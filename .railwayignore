@@ -9,3 +9,4 @@ venv/
 Secrests .txt
 secrets*
 *.secret
+.git/
