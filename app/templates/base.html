@@ -5,39 +5,106 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ app_name }}{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧵</text></svg>">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body>
+{% set is_auth_page = request.url.path.startswith('/auth/') %}
+{% set has_nav = account and not is_auth_page %}
+<body class="{{ 'bare' if is_auth_page else ('no-nav' if not has_nav else '') }}">
+
+{# Набор иконок: один спрайт, дальше по всему интерфейсу через <use> #}
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-grid" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+      <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+    </symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 14 9 5 9-5"/>
+    </symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 12h4l3-8 4 16 3-8h4"/>
+    </symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 20V10"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/>
+    </symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/>
+      <path d="M4 18h4"/><path d="M12 18h8"/><circle cx="10" cy="18" r="2"/>
+      <path d="M4 12h12"/><circle cx="18" cy="12" r="2"/>
+    </symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>
+    </symbol>
+    <symbol id="i-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="m20 6-11 11-5-5"/>
+    </symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><path d="M12 16.5v.01"/>
+    </symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>
+    </symbol>
+    <symbol id="i-mark" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 3v26"/><path d="M16 9c5 0 9 2.7 9 6s-4 6-9 6-9 2.7-9 6"/>
+    </symbol>
+  </defs>
+</svg>
+
 {% if account and not request.url.path.startswith('/auth/') %}
-<header class="topbar">
-  <a class="brand" href="/">🧵 <span>Threads Autopilot</span></a>
-  <nav>
-    <a href="/" class="{{ 'active' if request.url.path == '/' }}">Дашборд</a>
-    <a href="/queue" class="{{ 'active' if request.url.path.startswith('/queue') }}">
-      Очередь{% if pending_count %} <span class="badge">{{ pending_count }}</span>{% endif %}
-    </a>
-    <a href="/research" class="{{ 'active' if request.url.path.startswith('/research') }}">Тренды</a>
-    <a href="/posts" class="{{ 'active' if request.url.path.startswith('/posts') }}">Посты</a>
-    <a href="/settings" class="{{ 'active' if request.url.path.startswith('/settings') }}">Настройки</a>
+<aside class="sidebar">
+  <a class="brand" href="/">
+    <span class="brand-mark"><svg class="ic ic-lg"><use href="#i-mark"/></svg></span>
+    <span class="brand-text">
+      <strong>Leilath</strong>
+      <em>Connector</em>
+    </span>
+  </a>
+
+  <nav class="nav">
+    {% set items = [
+      ('/', 'i-grid', 'Дашборд', ''),
+      ('/queue', 'i-layers', 'Очередь', pending_count),
+      ('/research', 'i-pulse', 'Тренды', ''),
+      ('/posts', 'i-chart', 'Посты', ''),
+      ('/settings', 'i-sliders', 'Настройки', '')
+    ] %}
+    {% for href, icon, label, count in items %}
+      {% set is_active = (request.url.path == href) if href == '/' else request.url.path.startswith(href) %}
+      <a href="{{ href }}" class="nav-item{{ ' active' if is_active }}">
+        <svg class="ic"><use href="#{{ icon }}"/></svg>
+        <span>{{ label }}</span>
+        {% if count %}<i class="count">{{ count }}</i>{% endif %}
+      </a>
+    {% endfor %}
   </nav>
-  <div class="account">
-    <span>@{{ account.username or account.threads_user_id }}</span>
-    <a href="/auth/logout" class="muted">выйти</a>
+
+  <div class="sidebar-foot">
+    <div class="whoami">
+      <span class="dot"></span>
+      <span class="handle">@{{ account.username or account.threads_user_id }}</span>
+    </div>
+    <a href="/auth/logout" class="nav-item subtle">
+      <svg class="ic"><use href="#i-logout"/></svg>
+      <span>Выйти</span>
+    </a>
   </div>
-</header>
+</aside>
 {% endif %}
 
-<main>
-  {% if flash_ok %}<div class="flash ok">{{ flash_ok }}</div>{% endif %}
-  {% if flash_error %}<div class="flash error">{{ flash_error }}</div>{% endif %}
+<main class="content">
+  {% if flash_ok %}
+    <div class="flash ok"><svg class="ic"><use href="#i-check"/></svg><span>{{ flash_ok }}</span></div>
+  {% endif %}
+  {% if flash_error %}
+    <div class="flash error"><svg class="ic"><use href="#i-alert"/></svg><span>{{ flash_error }}</span></div>
+  {% endif %}
   {% if account and not llm_ready %}
-    <div class="flash warn">DEEPSEEK_API_KEY не задан — генерация текстов выключена.</div>
+    <div class="flash warn"><svg class="ic"><use href="#i-alert"/></svg><span>DEEPSEEK_API_KEY не задан — генерация текстов выключена.</span></div>
   {% endif %}
   {% block content %}{% endblock %}
 </main>
 
 <script>
-  // Раскрытие блоков вида <details> без потери позиции + счётчик символов
   document.addEventListener('input', function (e) {
     if (e.target.matches('textarea[data-counter]')) {
       const limit = parseInt(e.target.dataset.counter, 10);

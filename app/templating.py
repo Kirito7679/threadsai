@@ -70,4 +70,4 @@ templates.env.filters["ago"] = humanize_delta
 templates.env.filters["fromjson"] = from_json
 templates.env.filters["compact"] = compact
 templates.env.globals["tz_name"] = settings.timezone
-templates.env.globals["app_name"] = "Threads Autopilot"
+templates.env.globals["app_name"] = "Leilath Connector"

@@ -1,4 +1,4 @@
-# 🧵 Threads Autopilot
+# Leilath Connector
 
 Платформа автоматизации Threads: подключается к вашему аккаунту, изучает популярные ветки
 в нише, генерирует посты через DeepSeek, публикует по расписанию после вашего одобрения
@@ -54,7 +54,7 @@
 ```bash
 git init
 git add .
-git commit -m "Threads Autopilot"
+git commit -m "Leilath Connector"
 ```
 
 Дальше в Railway: **New Project → Deploy from GitHub repo** (или `railway up` через CLI).

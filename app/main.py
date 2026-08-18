@@ -1,4 +1,4 @@
-"""Точка входа: FastAPI-приложение Threads Autopilot."""
+"""Точка входа: FastAPI-приложение Leilath Connector."""
 from __future__ import annotations
 
 import logging
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
 
-app = FastAPI(title="Threads Autopilot", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="Leilath Connector", lifespan=lifespan, docs_url=None, redoc_url=None)
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
