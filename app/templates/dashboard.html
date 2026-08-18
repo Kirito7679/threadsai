@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Дашборд · {{ app_name }}{% endblock %}
+{% block content %}
+
+{% set cur = summary.current %}
+{% set d = summary.delta %}
+
+<h1>Дашборд</h1>
+<p class="lead">За последние 30 дней · часовой пояс {{ tz_name }}</p>
+
+<div class="grid cols-4">
+  <div class="card kpi">
+    <div class="label">Просмотры</div>
+    <div class="value">{{ cur.views | compact }}</div>
+    <div class="delta {{ 'up' if d.views >= 0 else 'down' }}">
+      {{ '+' if d.views >= 0 }}{{ d.views }}% к прошлому периоду
+    </div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Реакции</div>
+    <div class="value">{{ cur.engagement | compact }}</div>
+    <div class="delta {{ 'up' if d.engagement >= 0 else 'down' }}">
+      {{ '+' if d.engagement >= 0 }}{{ d.engagement }}%
+    </div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Вовлечённость</div>
+    <div class="value">{{ cur.er }}%</div>
+    <div class="delta muted">реакции ÷ просмотры</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Подписчики</div>
+    <div class="value">{{ summary.followers | compact }}</div>
+    <div class="delta muted">{{ cur.posts }} постов за период</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Просмотры по дням</h2>
+  {% set values = timeseries | map(attribute='views') | list %}
+  {% if values | length > 1 %}
+    {% set peak = values | max %}
+    {% set step = 600 / ((values | length) - 1) %}
+    <svg class="chart" viewBox="0 0 600 180" preserveAspectRatio="none">
+      <line class="axis" x1="0" y1="170" x2="600" y2="170"></line>
+      {% set points = [] %}
+      {% for v in values %}
+        {% set x = loop.index0 * step %}
+        {% set y = 170 - (v / peak * 150 if peak else 0) %}
+        {% set _ = points.append('%.1f,%.1f' % (x, y)) %}
+      {% endfor %}
+      <polygon class="area" points="0,170 {{ points | join(' ') }} 600,170"></polygon>
+      <polyline class="line" points="{{ points | join(' ') }}"></polyline>
+    </svg>
+    <div class="row small muted">
+      <span>{{ timeseries[0].day }}</span><span class="spacer"></span>
+      <span>пик {{ peak | compact }}</span><span class="spacer"></span>
+      <span>{{ timeseries[-1].day }}</span>
+    </div>
+  {% else %}
+    <p class="empty">Данных пока мало. Метрики аккаунта собираются раз в сутки.</p>
+  {% endif %}
+</div>
+
+<div class="grid cols-2">
+  <div class="card">
+    <h2>Ближайшие публикации</h2>
+    {% if scheduled %}
+      <table>
+        <tbody>
+        {% for draft in scheduled %}
+          {% set parts = draft.parts_json | fromjson %}
+          <tr>
+            <td style="width:90px" class="small muted">{{ draft.scheduled_at | local }}</td>
+            <td>
+              <div class="small">{{ parts[0][:110] if parts else '—' }}{{ '…' if parts and parts[0]|length > 110 }}</div>
+              <span class="tag">{{ draft.topic or 'без рубрики' }}</span>
+              {% if parts | length > 1 %}<span class="tag">{{ parts | length }} частей</span>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">
+        Ничего не запланировано.<br>
+        <a href="/queue">Одобрить черновики</a>
+      </p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Что работает лучше</h2>
+    {% if topics %}
+      <table>
+        <thead><tr><th>Рубрика</th><th class="num">Постов</th><th class="num">Ср. просмотры</th><th class="num">ER</th></tr></thead>
+        <tbody>
+        {% for t in topics %}
+          <tr>
+            <td>{{ t.topic }}</td>
+            <td class="num">{{ t.posts }}</td>
+            <td class="num">{{ t.avg_views | compact }}</td>
+            <td class="num">{{ t.er }}%</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">Нужно хотя бы несколько опубликованных постов из очереди.</p>
+    {% endif %}
+
+    {% if hours %}
+      <h3 style="margin-top:16px">Лучшие часы (UTC)</h3>
+      <div class="row">
+        {% for h in hours %}
+          <span class="tag">{{ '%02d' % h.hour }}:00 · {{ h.avg_views | compact }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h2>Топ постов за 30 дней</h2>
+  {% if top %}
+    <table>
+      <thead><tr><th>Пост</th><th class="num">Просмотры</th><th class="num">Реакции</th><th class="num">Дата</th></tr></thead>
+      <tbody>
+      {% for post in top %}
+        <tr>
+          <td><a href="/posts/{{ post.id }}">{{ post.text[:120] }}{{ '…' if post.text|length > 120 }}</a></td>
+          <td class="num">{{ post.views | compact }}</td>
+          <td class="num">{{ engagement_of(post) | compact }}</td>
+          <td class="num small muted">{{ post.published_at | local('%d.%m') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">Постов пока нет. Синхронизация запускается раз в час.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Фоновые задачи</h2>
+  <table>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td>{{ job.name }}</td>
+        <td class="small muted">{{ job.started_at | ago }}</td>
+        <td class="small"><span class="status {{ 'published' if job.status == 'ok' else 'failed' }}">{{ job.status }}</span></td>
+      </tr>
+    {% else %}
+      <tr><td class="muted small">Задачи ещё не запускались.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

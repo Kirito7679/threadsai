@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Тренды · {{ app_name }}{% endblock %}
+{% block content %}
+
+<div class="row">
+  <div>
+    <h1>Тренды ниши</h1>
+    <p class="lead">
+      Собрано постов: {{ total_research }}.
+      {% if report %}Последний отчёт — {{ report.created_at | ago }}, разобрано {{ report.posts_analyzed }}.{% endif %}
+    </p>
+  </div>
+  <div class="spacer"></div>
+  <form method="post" action="/research/run">
+    <button class="primary" type="submit">Запустить разведку</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Ключевые слова</h2>
+  <p class="hint">
+    По каждому слову платформа делает два запроса: TOP (популярное) и RECENT (свежее).
+    Лимит Threads — 2200 поисковых запросов в сутки, так что 10-20 слов держатся спокойно.
+  </p>
+  <div class="row" style="margin:12px 0">
+    {% for kw in keywords %}
+      <form method="post" action="/keywords/{{ kw.id }}/toggle" style="display:inline">
+        <button class="tag {{ 'on' if kw.is_active else 'off' }}" type="submit"
+                title="{{ 'Выключить' if kw.is_active else 'Включить' }}">
+          {{ '#' if kw.search_mode == 'TAG' }}{{ kw.term }}
+        </button>
+      </form>
+      <form method="post" action="/keywords/{{ kw.id }}/delete" style="display:inline">
+        <button class="ghost danger" type="submit" title="Удалить">×</button>
+      </form>
+    {% else %}
+      <span class="muted small">Пока пусто. Добавьте 5-15 слов из вашей ниши.</span>
+    {% endfor %}
+  </div>
+  <form method="post" action="/keywords/add" class="row">
+    <input type="text" name="term" placeholder="например: маркетинг" style="flex:1;min-width:200px" required>
+    <select name="search_mode" style="width:auto">
+      <option value="KEYWORD">по словам</option>
+      <option value="TAG">по тегу</option>
+    </select>
+    <button type="submit">Добавить</button>
+  </form>
+</div>
+
+{% if payload.summary %}
+<div class="card">
+  <h2>Что происходит в нише</h2>
+  <p>{{ payload.summary }}</p>
+</div>
+{% endif %}
+
+{% if payload.trends %}
+<div class="card">
+  <h2>Рабочие тренды</h2>
+  <table>
+    <thead><tr><th>Тренд</th><th>Почему заходит</th><th class="num">Сила</th></tr></thead>
+    <tbody>
+    {% for t in payload.trends %}
+      <tr>
+        <td><strong>{{ t.name }}</strong>
+          {% if t.example_hooks %}<div class="hint">{{ t.example_hooks | join(' · ') }}</div>{% endif %}
+        </td>
+        <td class="small">{{ t.why }}</td>
+        <td class="num">{{ (t.strength * 100) | round | int if t.strength is number else '—' }}%</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if payload.content_ideas %}
+<div class="card">
+  <h2>Идеи для постов</h2>
+  <table>
+    <thead><tr><th>Тема</th><th>Угол подачи</th><th>Почему сейчас</th></tr></thead>
+    <tbody>
+    {% for idea in payload.content_ideas %}
+      <tr>
+        <td><strong>{{ idea.topic }}</strong><div class="hint">{{ idea.hook_type }}</div></td>
+        <td class="small">{{ idea.angle }}</td>
+        <td class="small muted">{{ idea.why_now }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="hint" style="margin-top:10px">Эти идеи автоматически уходят в генератор черновиков.</p>
+</div>
+{% endif %}
+
+{% if payload.avoid %}
+<div class="card">
+  <h2>Заезженное — избегаем</h2>
+  <div class="row">{% for item in payload.avoid %}<span class="tag">{{ item }}</span>{% endfor %}</div>
+</div>
+{% endif %}
+
+{% if payload.stats %}
+<div class="card">
+  <h2>Частотность в популярной выдаче</h2>
+  <div class="grid cols-2">
+    <div>
+      <h3>Темы</h3>
+      {% for name, count in payload.stats.top_topics %}
+        <span class="tag">{{ name }} · {{ count }}</span>
+      {% endfor %}
+    </div>
+    <div>
+      <h3>Типы зацепок</h3>
+      {% for name, count in payload.stats.top_hooks %}
+        <span class="tag">{{ name }} · {{ count }}</span>
+      {% endfor %}
+      <h3 style="margin-top:14px">Форматы</h3>
+      {% for name, count in payload.stats.top_formats %}
+        <span class="tag">{{ name }} · {{ count }}</span>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Популярные ветки конкурентов</h2>
+  <p class="hint">
+    Выдача search_type=TOP — так Threads сам ранжирует популярность.
+    Точные лайки и просмотры чужих постов официальный API не отдаёт.
+  </p>
+  <table>
+    <thead><tr><th>Автор</th><th>Пост</th><th>Разбор</th></tr></thead>
+    <tbody>
+    {% for post in popular %}
+      <tr>
+        <td class="small">
+          {% if post.permalink %}<a href="{{ post.permalink }}" target="_blank" rel="noopener">@{{ post.username }}</a>
+          {% else %}@{{ post.username }}{% endif %}
+          <div class="hint">{{ post.keyword }}</div>
+        </td>
+        <td class="small">{{ post.text[:200] }}{{ '…' if post.text|length > 200 }}</td>
+        <td class="small muted">
+          {% if post.topic %}<span class="tag">{{ post.topic }}</span>{% endif %}
+          {% if post.hook_type %}<span class="tag">{{ post.hook_type }}</span>{% endif %}
+          {% if post.insight %}<div class="hint">{{ post.insight }}</div>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="3" class="empty">Пока ничего не собрано. Добавьте ключевые слова и запустите разведку.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

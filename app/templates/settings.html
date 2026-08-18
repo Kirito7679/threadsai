@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}Настройки · {{ app_name }}{% endblock %}
+{% block content %}
+
+<h1>Настройки</h1>
+<p class="lead">Здесь задаётся всё, на что опирается ИИ при написании веток.</p>
+
+<div class="card">
+  <h2>Аккаунт</h2>
+  {% if account %}
+    <p class="small">
+      Подключён <strong>@{{ account.username or account.threads_user_id }}</strong>.
+      Токен действует до {{ account.token_expires_at | local('%d.%m.%Y') }},
+      продлевается автоматически.
+    </p>
+    <p class="small muted">
+      Суточная квота публикаций:
+      {% if quota is not none %}осталось {{ quota }} из 250{% else %}узнать не удалось{% endif %}
+    </p>
+    <form method="post" action="/auth/disconnect" onsubmit="return confirm('Отключить аккаунт?')">
+      <button class="danger" type="submit">Отключить</button>
+    </form>
+  {% else %}
+    <a class="btn primary" href="/auth/threads">Подключить Threads</a>
+  {% endif %}
+</div>
+
+<form method="post" action="/settings">
+  <div class="card">
+    <h2>О чём аккаунт</h2>
+    <label>Ниша</label>
+    <input type="text" name="niche" value="{{ values.niche }}" placeholder="например: маркетинг для малого бизнеса">
+    <label>Аудитория</label>
+    <input type="text" name="audience" value="{{ values.audience }}" placeholder="кто читает и что им важно">
+    <label>Цели</label>
+    <input type="text" name="goals" value="{{ values.goals }}">
+    <label>Язык контента</label>
+    <input type="text" name="language" value="{{ values.language }}">
+    <label>Рубрики через запятую</label>
+    <input type="text" name="rubrics" value="{{ values.rubrics }}">
+  </div>
+
+  <div class="card">
+    <h2>Тон голоса</h2>
+    <p class="hint">Самое важное поле. Опишите, как вы пишете — модель следует этому дословно.</p>
+    <textarea name="brand_voice" rows="5">{{ values.brand_voice }}</textarea>
+    <label>Запрещено</label>
+    <textarea name="forbidden" rows="3">{{ values.forbidden }}</textarea>
+  </div>
+
+  <div class="card">
+    <h2>Расписание</h2>
+    <div class="grid cols-2">
+      <div>
+        <label>Постов в день</label>
+        <input type="number" name="posts_per_day" value="{{ values.posts_per_day }}" min="1" max="10">
+      </div>
+      <div>
+        <label>Часы публикации ({{ tz_name }}), через запятую</label>
+        <input type="text" name="posting_hours" value="{{ values.posting_hours }}">
+      </div>
+    </div>
+    <label>Кто может отвечать</label>
+    <select name="reply_control">
+      {% for value, title in [('everyone','Все'), ('accounts_you_follow','Только те, на кого подписан'), ('mentioned_only','Только упомянутые')] %}
+        <option value="{{ value }}" {{ 'selected' if values.reply_control == value }}>{{ title }}</option>
+      {% endfor %}
+    </select>
+    <label class="inline" style="margin-top:16px">
+      <input type="checkbox" name="autopilot" value="true" {{ 'checked' if values.autopilot == 'true' }}>
+      Автопилот: публиковать без модерации
+    </label>
+    <p class="hint">
+      Выключено — черновики ждут вашего одобрения в очереди. Включайте, когда качество
+      генерации вас стабильно устраивает.
+    </p>
+  </div>
+
+  <div class="row end">
+    <button class="primary" type="submit">Сохранить</button>
+  </div>
+</form>
+
+<div class="card">
+  <h2>Фоновые задачи</h2>
+  <p class="hint">
+    Разведка — каждые {{ app_settings.research_interval_hours }} ч,
+    метрики — каждые {{ app_settings.metrics_interval_minutes }} мин,
+    генерация — ежедневно в {{ app_settings.generation_hour }}:00,
+    публикация — каждые 2 мин.
+  </p>
+  <div class="row" style="margin:12px 0">
+    {% for name, title in [('research','Разведка'), ('generate_drafts','Генерация'), ('sync_and_metrics','Метрики постов'), ('account_metrics','Метрики аккаунта'), ('publish_due','Публикация'), ('refresh_tokens','Продлить токен')] %}
+      <form method="post" action="/jobs/{{ name }}/run" style="display:inline">
+        <button type="submit">{{ title }}</button>
+      </form>
+    {% endfor %}
+  </div>
+  <table>
+    <thead><tr><th>Задача</th><th>Запуск</th><th>Статус</th><th>Результат</th></tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr>
+        <td class="small">{{ job.name }}</td>
+        <td class="small muted">{{ job.started_at | local('%d.%m %H:%M') }}</td>
+        <td><span class="status {{ 'published' if job.status == 'ok' else ('approved' if job.status == 'running' else 'failed') }}">{{ job.status }}</span></td>
+        <td class="hint">{{ job.detail[:180] }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="empty">Задачи ещё не запускались.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Подключение · {{ app_name }}{% endblock %}
+{% block content %}
+<div style="max-width:640px;margin:6vh auto">
+  <h1>🧵 Подключите аккаунт Threads</h1>
+  <p class="lead">Осталось два шага, дальше платформа работает сама.</p>
+
+  <div class="card">
+    <h2>1. Приложение Threads</h2>
+    <p class="small muted">
+      На <a href="https://developers.facebook.com/apps" target="_blank" rel="noopener">developers.facebook.com</a>
+      создайте приложение с сценарием использования «Threads API» и включите разрешения:
+      <code>threads_basic</code>, <code>threads_content_publish</code>,
+      <code>threads_manage_insights</code>, <code>threads_manage_replies</code>,
+      <code>threads_keyword_search</code>.
+    </p>
+    <p class="small muted">
+      В настройках приложения укажите Redirect Callback URL — он должен точно совпадать со значением
+      <code>THREADS_REDIRECT_URI</code>:
+    </p>
+    <div class="part">{{ app_settings.threads_redirect_uri }}</div>
+    <p class="hint">
+      Аккаунт Threads должен быть публичным и переведён в профессиональный режим,
+      иначе API не выдаст разрешения.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>2. Авторизация</h2>
+    <p class="small muted">
+      Нажмите кнопку — откроется страница Threads, где вы подтвердите доступ.
+      Токен сохранится в базе в зашифрованном виде и будет продлеваться автоматически.
+    </p>
+    <a class="btn primary" href="/auth/threads">Подключить Threads</a>
+  </div>
+</div>
+{% endblock %}

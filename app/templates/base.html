@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧵</text></svg>">
+</head>
+<body>
+{% if account %}
+<header class="topbar">
+  <a class="brand" href="/">🧵 <span>Threads Autopilot</span></a>
+  <nav>
+    <a href="/" class="{{ 'active' if request.url.path == '/' }}">Дашборд</a>
+    <a href="/queue" class="{{ 'active' if request.url.path.startswith('/queue') }}">
+      Очередь{% if pending_count %} <span class="badge">{{ pending_count }}</span>{% endif %}
+    </a>
+    <a href="/research" class="{{ 'active' if request.url.path.startswith('/research') }}">Тренды</a>
+    <a href="/posts" class="{{ 'active' if request.url.path.startswith('/posts') }}">Посты</a>
+    <a href="/settings" class="{{ 'active' if request.url.path.startswith('/settings') }}">Настройки</a>
+  </nav>
+  <div class="account">
+    <span>@{{ account.username or account.threads_user_id }}</span>
+    <a href="/auth/logout" class="muted">выйти</a>
+  </div>
+</header>
+{% endif %}
+
+<main>
+  {% if flash_ok %}<div class="flash ok">{{ flash_ok }}</div>{% endif %}
+  {% if flash_error %}<div class="flash error">{{ flash_error }}</div>{% endif %}
+  {% if account and not llm_ready %}
+    <div class="flash warn">DEEPSEEK_API_KEY не задан — генерация текстов выключена.</div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+  // Раскрытие блоков вида <details> без потери позиции + счётчик символов
+  document.addEventListener('input', function (e) {
+    if (e.target.matches('textarea[data-counter]')) {
+      const limit = parseInt(e.target.dataset.counter, 10);
+      const out = document.querySelector(e.target.dataset.target);
+      if (!out) return;
+      const parts = e.target.value.split('\n\n').filter(p => p.trim());
+      const bad = parts.filter(p => p.trim().length > limit).length;
+      out.textContent = parts.length + ' частей' + (bad ? ' · превышен лимит в ' + bad : '');
+      out.className = bad ? 'hint error-text' : 'hint';
+    }
+  });
+</script>
+</body>
+</html>

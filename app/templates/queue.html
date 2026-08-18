@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Очередь · {{ app_name }}{% endblock %}
+{% block content %}
+
+<div class="row">
+  <div>
+    <h1>Очередь модерации</h1>
+    <p class="lead">ИИ пишет — вы одобряете. Публикация идёт по расписанию ({{ tz_name }}).</p>
+  </div>
+  <div class="spacer"></div>
+  <form method="post" action="/queue/generate" class="row">
+    <input type="number" name="count" value="3" min="1" max="10" style="width:70px">
+    <button class="primary" type="submit" {{ 'disabled' if not llm_ready }}>Сгенерировать</button>
+  </form>
+  {% if counts.pending %}
+    <form method="post" action="/queue/approve-all">
+      <button type="submit">Одобрить все ({{ counts.pending }})</button>
+    </form>
+  {% endif %}
+</div>
+
+<div class="row" style="margin:8px 0 18px">
+  {% for name, title in [('pending','На модерации'), ('approved','Запланировано'), ('published','Опубликовано'), ('rejected','Отклонено'), ('failed','Ошибки'), ('all','Все')] %}
+    <a class="btn {{ 'primary' if status == name }}" href="/queue?status={{ name }}">
+      {{ title }}{% if counts.get(name) %} · {{ counts[name] }}{% endif %}
+    </a>
+  {% endfor %}
+</div>
+
+{% for draft in drafts %}
+  {% set parts = draft.parts_json | fromjson %}
+  <div class="draft">
+    <div class="draft-head">
+      <span class="status {{ draft.status }}">{{ draft.status }}</span>
+      {% if draft.topic %}<span class="tag">{{ draft.topic }}</span>{% endif %}
+      {% if draft.hook_type %}<span class="tag">{{ draft.hook_type }}</span>{% endif %}
+      {% if draft.edited_by_human %}<span class="tag">правил человек</span>{% endif %}
+      <span class="spacer"></span>
+      <span class="hint">
+        {% if draft.status == 'approved' and draft.scheduled_at %}
+          выход {{ draft.scheduled_at | local }}
+        {% elif draft.status == 'published' %}
+          опубликовано {{ draft.published_at | local }}
+        {% else %}
+          создан {{ draft.created_at | ago }}
+        {% endif %}
+      </span>
+    </div>
+
+    {% for part in parts %}
+      <div class="part">{{ part }}<div class="meta">{{ part | length }}/{{ max_chars }} символов · часть {{ loop.index }}</div></div>
+    {% endfor %}
+
+    {% if draft.rationale %}<p class="hint">Обоснование: {{ draft.rationale }}</p>{% endif %}
+    {% if draft.error %}<p class="hint error-text">Ошибка: {{ draft.error }}</p>{% endif %}
+    {% if draft.reject_reason %}<p class="hint">Причина отклонения: {{ draft.reject_reason }}</p>{% endif %}
+
+    {% if draft.status in ('pending', 'approved', 'failed', 'rejected') %}
+      <div class="row" style="margin-top:12px">
+        <form method="post" action="/queue/{{ draft.id }}/approve" class="row">
+          <input type="datetime-local" name="scheduled_at"
+                 value="{{ (draft.scheduled_at or next_slots[0]) | local('%Y-%m-%dT%H:%M') if (draft.scheduled_at or next_slots) else '' }}"
+                 style="width:200px">
+          <button class="primary" type="submit">Запланировать</button>
+        </form>
+        <form method="post" action="/queue/{{ draft.id }}/publish-now"
+              onsubmit="return confirm('Опубликовать прямо сейчас?')">
+          <button type="submit">Опубликовать сейчас</button>
+        </form>
+        <div class="spacer"></div>
+        <form method="post" action="/queue/{{ draft.id }}/delete"
+              onsubmit="return confirm('Удалить черновик?')">
+          <button class="ghost danger" type="submit">Удалить</button>
+        </form>
+      </div>
+
+      <details>
+        <summary>Редактировать текст</summary>
+        <div>
+          <form method="post" action="/queue/{{ draft.id }}/edit">
+            <label>Части ветки — разделяйте пустой строкой</label>
+            <textarea name="parts" rows="10" data-counter="{{ max_chars }}"
+                      data-target="#count-{{ draft.id }}">{{ parts | join('\n\n') }}</textarea>
+            <div class="hint" id="count-{{ draft.id }}">{{ parts | length }} частей</div>
+            <label>Рубрика</label>
+            <input type="text" name="topic" value="{{ draft.topic }}">
+            <div class="row end" style="margin-top:12px">
+              <button class="primary" type="submit">Сохранить</button>
+            </div>
+          </form>
+        </div>
+      </details>
+
+      <details>
+        <summary>Переписать с замечанием</summary>
+        <div>
+          <form method="post" action="/queue/{{ draft.id }}/regenerate">
+            <input type="text" name="instruction"
+                   placeholder="Например: сделай первую строку жёстче, убери воду в конце">
+            <div class="row end" style="margin-top:10px">
+              <button type="submit" {{ 'disabled' if not llm_ready }}>Переписать</button>
+            </div>
+          </form>
+          <form method="post" action="/queue/{{ draft.id }}/reject" style="margin-top:10px">
+            <input type="text" name="reason" placeholder="Причина отклонения (необязательно)">
+            <div class="row end" style="margin-top:10px">
+              <button class="danger" type="submit">Отклонить</button>
+            </div>
+          </form>
+        </div>
+      </details>
+    {% endif %}
+  </div>
+{% else %}
+  <div class="card">
+    <p class="empty">
+      Черновиков в этом статусе нет.<br>
+      {% if llm_ready %}Нажмите «Сгенерировать» — ИИ напишет варианты на основе трендов.
+      {% else %}Сначала задайте DEEPSEEK_API_KEY.{% endif %}
+    </p>
+  </div>
+{% endfor %}
+
+{% endblock %}

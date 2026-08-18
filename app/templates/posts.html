@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Посты · {{ app_name }}{% endblock %}
+{% block content %}
+
+<h1>Опубликованные посты</h1>
+<p class="lead">Метрики обновляются раз в час для постов моложе 30 дней.</p>
+
+<div class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>Пост</th>
+        <th class="num">Просмотры</th>
+        <th class="num">Лайки</th>
+        <th class="num">Ответы</th>
+        <th class="num">Репосты</th>
+        <th class="num">ER</th>
+        <th class="num">Дата</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for post in posts %}
+      <tr>
+        <td>
+          <a href="/posts/{{ post.id }}">{{ post.text[:130] }}{{ '…' if post.text|length > 130 }}</a>
+          {% if post.topic %}<div><span class="tag">{{ post.topic }}</span></div>{% endif %}
+        </td>
+        <td class="num">{{ post.views | compact }}</td>
+        <td class="num">{{ post.likes | compact }}</td>
+        <td class="num">{{ post.replies | compact }}</td>
+        <td class="num">{{ post.reposts | compact }}</td>
+        <td class="num">{{ er_of(post) }}%</td>
+        <td class="num small muted">{{ post.published_at | local('%d.%m.%y') }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="empty">Постов пока нет. Синхронизация с Threads идёт раз в час.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}

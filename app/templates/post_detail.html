@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Пост · {{ app_name }}{% endblock %}
+{% block content %}
+
+<p class="small"><a href="/posts">← ко всем постам</a></p>
+<h1>Пост от {{ post.published_at | local('%d.%m.%Y %H:%M') }}</h1>
+<p class="lead">
+  {% if post.topic %}<span class="tag">{{ post.topic }}</span>{% endif %}
+  {% if post.permalink %}<a href="{{ post.permalink }}" target="_blank" rel="noopener">открыть в Threads</a>{% endif %}
+</p>
+
+<div class="grid cols-4">
+  <div class="card kpi"><div class="label">Просмотры</div><div class="value">{{ post.views | compact }}</div></div>
+  <div class="card kpi"><div class="label">Реакции</div><div class="value">{{ engagement | compact }}</div></div>
+  <div class="card kpi"><div class="label">Вовлечённость</div><div class="value">{{ er }}%</div></div>
+  <div class="card kpi"><div class="label">Ответы</div><div class="value">{{ post.replies | compact }}</div></div>
+</div>
+
+<div class="card">
+  <h2>Текст ветки</h2>
+  {% for item in chain %}
+    <div class="part">{{ item.text }}<div class="meta">
+      часть {{ item.chain_index + 1 }} · {{ item.views | compact }} просмотров · {{ item.likes | compact }} лайков
+    </div></div>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <h2>Как набирал просмотры</h2>
+  {% set values = metrics | map(attribute='views') | list %}
+  {% if values | length > 1 %}
+    {% set peak = values | max %}
+    {% set step = 600 / ((values | length) - 1) %}
+    <svg class="chart" viewBox="0 0 600 180" preserveAspectRatio="none">
+      <line class="axis" x1="0" y1="170" x2="600" y2="170"></line>
+      {% set points = [] %}
+      {% for v in values %}
+        {% set _ = points.append('%.1f,%.1f' % (loop.index0 * step, 170 - (v / peak * 150 if peak else 0))) %}
+      {% endfor %}
+      <polygon class="area" points="0,170 {{ points | join(' ') }} 600,170"></polygon>
+      <polyline class="line" points="{{ points | join(' ') }}"></polyline>
+    </svg>
+    <div class="row small muted">
+      <span>{{ metrics[0].collected_at | local }}</span>
+      <span class="spacer"></span>
+      <span>{{ metrics[-1].collected_at | local }}</span>
+    </div>
+  {% else %}
+    <p class="empty">Нужно минимум два замера. Метрики снимаются раз в час.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>История замеров</h2>
+  <table>
+    <thead><tr><th>Время</th><th class="num">Просмотры</th><th class="num">Лайки</th><th class="num">Ответы</th><th class="num">Репосты</th></tr></thead>
+    <tbody>
+    {% for m in metrics | reverse %}
+      <tr>
+        <td class="small muted">{{ m.collected_at | local('%d.%m %H:%M') }}</td>
+        <td class="num">{{ m.views | compact }}</td>
+        <td class="num">{{ m.likes | compact }}</td>
+        <td class="num">{{ m.replies | compact }}</td>
+        <td class="num">{{ m.reposts | compact }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="empty">Замеров пока нет.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% endblock %}
