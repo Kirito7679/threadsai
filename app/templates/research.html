@@ -16,6 +16,27 @@
   </form>
 </div>
 
+{% if search_denied %}
+<div class="card" style="border-color:rgba(217,168,85,.32)">
+  <h2 style="color:var(--warn)">Поиск по чужим постам недоступен</h2>
+  <p class="small">
+    Threads отвечает отказом: <code>Application does not have permission for this action</code>.
+    Разрешение <code>threads_keyword_search</code> открывает поиск по публичным постам
+    только после одобрения приложения в <strong>App Review</strong>. Без него поиск
+    ограничен вашими собственными постами.
+  </p>
+  <p class="hint">
+    Что проверить в первую очередь: включено ли разрешение в разделе Use cases →
+    Access the Threads API → Permissions. Если вы добавили его уже после входа в панель,
+    нужно переподключить аккаунт — старый токен выдан без этого разрешения.
+  </p>
+  <p class="hint">
+    Пока разрешения нет, платформа работает на ваших данных: генератор опирается
+    на ваши лучшие посты, статистику рубрик и лучшие часы публикации.
+  </p>
+</div>
+{% endif %}
+
 <div class="card">
   <h2>Ключевые слова</h2>
   <p class="hint">

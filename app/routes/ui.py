@@ -287,6 +287,7 @@ def research_page(request: Request, db: Session = Depends(get_db)):
     context.update(
         {
             "keywords": get_keywords(db, account.id, only_active=False),
+            "search_denied": get_settings_dict(db, account.id).get("keyword_search_denied") == "true",
             "report": report,
             "payload": payload,
             "popular": popular,

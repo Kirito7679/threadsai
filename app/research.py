@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.accounts import client_for, get_keywords, get_settings_dict
+from app.accounts import client_for, get_keywords, get_settings_dict, set_setting
 from app.llm import LLMError, get_llm
 from app.models import Account, ResearchPost, TrendReport
 from app.threads_api import ThreadsAPIError, parse_timestamp
@@ -42,6 +42,7 @@ def collect_research(db: Session, account: Account, per_keyword: int = 25) -> di
     collected = 0
     new = 0
     errors: list[str] = []
+    permission_denied = False
 
     for keyword in keywords:
         for search_type in ("TOP", "RECENT"):
@@ -55,6 +56,19 @@ def collect_research(db: Session, account: Account, per_keyword: int = 25) -> di
             except ThreadsAPIError as exc:
                 log.warning("Поиск '%s' (%s) не удался: %s", keyword.term, search_type, exc)
                 errors.append(f"{keyword.term}/{search_type}: {exc}")
+
+                # Meta отдаёт публичный поиск только приложениям, прошедшим App Review
+                if "permission for this action" in str(exc).lower():
+                    permission_denied = True
+                    set_setting(db, account.id, "keyword_search_denied", "true")
+                    return {
+                        "collected": collected,
+                        "new": new,
+                        "errors": errors[:2],
+                        "permission_denied": True,
+                        "note": "Нет разрешения threads_keyword_search — нужен App Review",
+                    }
+
                 if exc.is_rate_limit or exc.is_auth_error:
                     return {
                         "collected": collected,
@@ -88,6 +102,8 @@ def collect_research(db: Session, account: Account, per_keyword: int = 25) -> di
                 )
             db.flush()
 
+    if collected and not permission_denied:
+        set_setting(db, account.id, "keyword_search_denied", "false")
     return {"collected": collected, "new": new, "errors": errors}
 
 
