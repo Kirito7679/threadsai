@@ -98,7 +98,8 @@
   {% if flash_error %}
     <div class="flash error"><svg class="ic"><use href="#i-alert"/></svg><span>{{ flash_error }}</span></div>
   {% endif %}
-  {% if account and not llm_ready %}
+  {# Предупреждение только внутри панели: на странице входа llm_ready не считается #}
+  {% if has_nav and not llm_ready %}
     <div class="flash warn"><svg class="ic"><use href="#i-alert"/></svg><span>DEEPSEEK_API_KEY не задан — генерация текстов выключена.</span></div>
   {% endif %}
   {% block content %}{% endblock %}
