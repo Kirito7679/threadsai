@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.db import init_db
 from app.routes import auth as auth_routes
+from app.routes import legal as legal_routes
 from app.routes import ui as ui_routes
 from app.scheduler import start_scheduler, stop_scheduler
 from app.security import read_session_cookie
@@ -22,7 +23,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("threads-autopilot")
 
-PUBLIC_PREFIXES = ("/auth/", "/static/", "/healthz", "/favicon.ico")
+PUBLIC_PREFIXES = (
+    "/auth/",
+    "/static/",
+    "/healthz",
+    "/favicon.ico",
+    "/privacy",
+    "/data-deletion",
+)
 
 
 @asynccontextmanager
@@ -51,4 +59,5 @@ async def require_login(request: Request, call_next):
 
 
 app.include_router(auth_routes.router)
+app.include_router(legal_routes.router)
 app.include_router(ui_routes.router)
