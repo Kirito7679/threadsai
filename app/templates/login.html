@@ -1,18 +1,72 @@
 {% extends "base.html" %}
 {% block title %}Вход · {{ app_name }}{% endblock %}
 {% block content %}
-<div class="login-wrap">
-  <div class="card">
+<div style="max-width:520px;margin:8vh auto">
+
+  <div class="card" style="text-align:center">
     <h1>🧵 Threads Autopilot</h1>
-    <p class="lead">Введите пароль панели.</p>
-    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
-    <form method="post" action="/auth/login">
-      <label for="password">Пароль</label>
-      <input type="password" id="password" name="password" autofocus required>
-      <div class="row end" style="margin-top:16px">
-        <button class="primary" type="submit">Войти</button>
+    <p class="lead">
+      {% if account %}
+        Войдите аккаунтом <strong>@{{ account.username }}</strong>, чтобы открыть панель.
+      {% else %}
+        Подключите аккаунт Threads — это и вход в панель, и первичная настройка.
+      {% endif %}
+    </p>
+
+    {% if error %}<div class="flash error" style="text-align:left">{{ error }}</div>{% endif %}
+
+    {% if app_configured %}
+      <a class="btn primary" href="/auth/threads"
+         style="display:inline-block;font-size:15px;padding:11px 26px">
+        Войти через Threads
+      </a>
+      <p class="hint" style="margin-top:12px">
+        Откроется страница Threads. Логин и пароль вводятся там — приложение их не видит
+        и не сохраняет.
+      </p>
+    {% else %}
+      <div class="flash warn" style="text-align:left">
+        Не заданы THREADS_APP_ID и THREADS_APP_SECRET — вход через Threads недоступен.
       </div>
-    </form>
+    {% endif %}
   </div>
+
+  {% if not account %}
+  <div class="card">
+    <h2>Что нужно один раз настроить</h2>
+    <p class="small muted">
+      Приложение в кабинете Meta должно знать, куда возвращать вас после входа.
+      В настройках сценария <strong>Access the Threads API</strong>, поле
+      <strong>Redirect Callback URLs</strong>, должен быть указан ровно этот адрес:
+    </p>
+    <div class="part">{{ app_settings.threads_redirect_uri }}</div>
+    <p class="small muted" style="margin-top:12px">
+      И вы должны быть добавлены в приложении как <strong>Threads Tester</strong>
+      (App roles → Roles), а приглашение принято в самом Threads:
+      Настройки → Аккаунт → Разрешения для сайтов → Приглашения.
+    </p>
+    <p class="hint">
+      Если этих двух шагов нет, Threads не покажет запрос разрешений и вернёт ошибку.
+    </p>
+  </div>
+  {% endif %}
+
+  <details style="max-width:520px;margin:0 auto">
+    <summary>Не получается войти через Threads?</summary>
+    <div class="card" style="margin-top:10px">
+      <p class="hint">
+        Запасной вход по паролю панели — на случай, если Meta недоступна или
+        callback-адрес ещё не прописан.
+      </p>
+      <form method="post" action="/auth/login">
+        <label for="password">Пароль панели</label>
+        <input type="password" id="password" name="password" required>
+        <div class="row end" style="margin-top:12px">
+          <button type="submit">Войти по паролю</button>
+        </div>
+      </form>
+    </div>
+  </details>
+
 </div>
 {% endblock %}
