@@ -37,6 +37,16 @@ def get_active_account(db: Session) -> Account | None:
     return db.scalars(select(Account).where(Account.is_active.is_(True)).order_by(Account.id)).first()
 
 
+def get_account_by_threads_id(db: Session, threads_user_id: str) -> Account | None:
+    if not threads_user_id:
+        return None
+    return db.scalars(
+        select(Account).where(
+            Account.threads_user_id == str(threads_user_id), Account.is_active.is_(True)
+        )
+    ).first()
+
+
 def get_all_accounts(db: Session) -> list[Account]:
     return list(db.scalars(select(Account).where(Account.is_active.is_(True)).order_by(Account.id)))
 

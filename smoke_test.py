@@ -305,6 +305,39 @@ def main() -> int:
         outcome = publisher.publish_due(db, account)
         check("просроченный слот опубликован", outcome.get("published") == 1, str(outcome))
 
+    print("\n7. Изоляция кабинетов")
+    with session_scope() as db:
+        stranger = Account(
+            threads_user_id="99999999999",
+            username="stranger",
+            access_token_enc=encrypt("other-token"),
+        )
+        db.add(stranger)
+        db.flush()
+        foreign = Draft(
+            account_id=stranger.id,
+            status="pending",
+            parts_json=json.dumps(["Черновик чужого аккаунта"], ensure_ascii=False),
+        )
+        db.add(foreign)
+        db.flush()
+        foreign_id = foreign.id
+
+    # Сессия принадлежит первому аккаунту — чужой черновик должен быть недоступен
+    for path in (f"/queue/{foreign_id}/edit", f"/queue/{foreign_id}/delete"):
+        response = client.post(
+            path, data={"parts": "взлом"}, follow_redirects=False
+        )
+        check(
+            f"чужой черновик защищён {path}",
+            "error" in response.headers.get("location", ""),
+            response.headers.get("location", ""),
+        )
+
+    with session_scope() as db:
+        survivor = db.get(Draft, foreign_id)
+        check("чужой черновик не изменён", survivor is not None and "чужого" in survivor.parts_json)
+
     print("\n" + "=" * 52)
     if failures:
         print(f"ПРОВАЛЕНО ПРОВЕРОК: {len(failures)}")

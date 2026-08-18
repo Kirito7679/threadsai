@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.accounts import get_active_account, upsert_account
+from app.accounts import get_account_by_threads_id, get_active_account, upsert_account
 from app.config import settings
 from app.db import get_db
 from app.security import check_password, make_session_cookie, new_state_token, read_session_cookie
@@ -37,13 +37,13 @@ def _set_session(response, threads_user_id: str = ""):
 @router.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, error: str = "", db: Session = Depends(get_db)):
     """Единственный вход — через Threads. Пароль остаётся запасным вариантом."""
-    account = get_active_account(db)
     return templates.TemplateResponse(
         request,
         "login.html",
         {
             "error": error or request.query_params.get("error", ""),
-            "account": account,
+            "account": None,
+            "has_accounts": get_active_account(db) is not None,
             "app_settings": settings,
             "app_configured": bool(settings.threads_app_id and settings.threads_app_secret),
         },
@@ -54,13 +54,13 @@ def login_form(request: Request, error: str = "", db: Session = Depends(get_db))
 def login(request: Request, password: str = Form(...), db: Session = Depends(get_db)):
     """Запасной вход по паролю — на случай, если OAuth недоступен."""
     if not check_password(password):
-        account = get_active_account(db)
         return templates.TemplateResponse(
             request,
             "login.html",
             {
                 "error": "Неверный пароль",
-                "account": account,
+                "account": None,
+                "has_accounts": get_active_account(db) is not None,
                 "app_settings": settings,
                 "app_configured": bool(settings.threads_app_id and settings.threads_app_secret),
             },
@@ -117,16 +117,9 @@ def oauth_callback(
         short = ThreadsClient.exchange_code(code)
         threads_user_id = str(short.get("user_id", ""))
 
-        # Панель принадлежит первому подключившемуся аккаунту.
-        # Чужой аккаунт получит отказ, даже если сумел авторизоваться в Meta.
-        owner = get_active_account(db)
-        if owner is not None and owner.threads_user_id != threads_user_id:
-            log.warning("Отказ во входе: @%s не владелец панели", short.get("user_id"))
-            return RedirectResponse(
-                "/auth/login?error=Эта+панель+принадлежит+другому+аккаунту+Threads",
-                status_code=303,
-            )
-
+        # Каждый аккаунт получает собственный кабинет: свои ключевые слова,
+        # черновики, посты и настройки. Авторизоваться могут только те,
+        # кого вы добавили в Threads Testers приложения.
         long_lived = ThreadsClient.exchange_long_lived(short["access_token"])
         account = upsert_account(
             db,
@@ -150,9 +143,12 @@ def oauth_callback(
 
 
 @router.post("/disconnect")
-def disconnect(db: Session = Depends(get_db)):
-    account = get_active_account(db)
+def disconnect(request: Request, db: Session = Depends(get_db)):
+    session = read_session_cookie(request.cookies.get(SESSION_COOKIE)) or {}
+    account = get_account_by_threads_id(db, session.get("uid", "")) or get_active_account(db)
     if account is not None:
         account.is_active = False
         db.commit()
-    return RedirectResponse("/settings?ok=Аккаунт+отключён", status_code=303)
+    response = RedirectResponse("/auth/login?ok=Аккаунт+отключён", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response

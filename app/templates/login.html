@@ -37,14 +37,11 @@
       </a>
 
       <h2 style="font-size:20px;letter-spacing:-.02em">
-        {% if account %}С возвращением{% else %}Подключение аккаунта{% endif %}
+        Вход в кабинет
       </h2>
       <p class="hint" style="margin-bottom:22px">
-        {% if account %}
-          Войдите аккаунтом @{{ account.username }}, чтобы открыть панель.
-        {% else %}
-          Авторизация в Threads — это одновременно вход в панель и первичная настройка.
-        {% endif %}
+        Авторизация в Threads открывает ваш кабинет. У каждого аккаунта свои
+        ключевые слова, черновики и аналитика.
       </p>
 
       {% if error %}
@@ -67,7 +64,7 @@
         </div>
       {% endif %}
 
-      {% if not account %}
+      {% if not has_accounts %}
       <div class="auth-setup">
         <h3>Настройка приложения Meta</h3>
         <p class="hint">

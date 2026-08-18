@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import analytics, generator, publisher, research
 from app.accounts import (
     DEFAULT_SETTINGS,
+    get_account_by_threads_id,
     get_active_account,
     get_keywords,
     get_settings_dict,
@@ -24,12 +25,34 @@ from app.db import get_db, session_scope
 from app.llm import get_llm
 from app.models import Account, Draft, JobRun, Keyword, Post, PostMetric, ResearchPost
 from app.research import latest_report
+from app.security import read_session_cookie
 from app.templating import templates
 from app.threads_api import MAX_POST_CHARS
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 LOCAL_TZ = ZoneInfo(app_settings.timezone)
+
+
+def current_account(request: Request, db: Session) -> Account | None:
+    """Аккаунт текущей сессии.
+
+    В панель может войти любой Threads Tester приложения, и у каждого свой
+    кабинет. Запасной вход по паролю сессию без uid — тогда берём первый
+    активный аккаунт.
+    """
+    session = read_session_cookie(request.cookies.get("session")) or {}
+    account = get_account_by_threads_id(db, session.get("uid", ""))
+    return account or get_active_account(db)
+
+
+def owned_draft(request: Request, db: Session, draft_id: int) -> Draft | None:
+    """Черновик текущего аккаунта. Чужие не отдаём даже по прямому номеру."""
+    account = current_account(request, db)
+    draft = db.get(Draft, draft_id)
+    if draft is None or account is None or draft.account_id != account.id:
+        return None
+    return draft
 
 
 def _base_context(request: Request, db: Session, account: Account | None) -> dict:
@@ -67,7 +90,7 @@ def _parse_local_datetime(raw: str) -> datetime | None:
 
 @router.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
 
     if account is None:
@@ -101,7 +124,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/queue", response_class=HTMLResponse)
 def queue(request: Request, status: str = "pending", db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
     if account is None:
         return RedirectResponse("/", status_code=303)
@@ -132,8 +155,8 @@ def queue(request: Request, status: str = "pending", db: Session = Depends(get_d
 
 
 @router.post("/queue/generate")
-def queue_generate(count: int = Form(3), db: Session = Depends(get_db)):
-    account = get_active_account(db)
+def queue_generate(request: Request, count: int = Form(3), db: Session = Depends(get_db)):
+    account = current_account(request, db)
     if account is None:
         return RedirectResponse("/", status_code=303)
     result = generator.generate_drafts(db, account, count=max(1, min(count, 10)))
@@ -144,8 +167,8 @@ def queue_generate(count: int = Form(3), db: Session = Depends(get_db)):
 
 
 @router.post("/queue/{draft_id}/approve")
-def approve(draft_id: int, scheduled_at: str = Form(""), db: Session = Depends(get_db)):
-    draft = db.get(Draft, draft_id)
+def approve(request: Request, draft_id: int, scheduled_at: str = Form(""), db: Session = Depends(get_db)):
+    draft = owned_draft(request, db, draft_id)
     if draft is None:
         return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
 
@@ -163,8 +186,8 @@ def approve(draft_id: int, scheduled_at: str = Form(""), db: Session = Depends(g
 
 
 @router.post("/queue/approve-all")
-def approve_all(db: Session = Depends(get_db)):
-    account = get_active_account(db)
+def approve_all(request: Request, db: Session = Depends(get_db)):
+    account = current_account(request, db)
     if account is None:
         return RedirectResponse("/", status_code=303)
 
@@ -186,19 +209,20 @@ def approve_all(db: Session = Depends(get_db)):
 
 
 @router.post("/queue/{draft_id}/reject")
-def reject(draft_id: int, reason: str = Form(""), db: Session = Depends(get_db)):
-    draft = db.get(Draft, draft_id)
-    if draft is not None:
-        draft.status = "rejected"
-        draft.reject_reason = reason
-        db.commit()
+def reject(request: Request, draft_id: int, reason: str = Form(""), db: Session = Depends(get_db)):
+    draft = owned_draft(request, db, draft_id)
+    if draft is None:
+        return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
+    draft.status = "rejected"
+    draft.reject_reason = reason
+    db.commit()
     return RedirectResponse("/queue?ok=Отклонено", status_code=303)
 
 
 @router.post("/queue/{draft_id}/edit")
-def edit(draft_id: int, parts: str = Form(...), topic: str = Form(""), db: Session = Depends(get_db)):
+def edit(request: Request, draft_id: int, parts: str = Form(...), topic: str = Form(""), db: Session = Depends(get_db)):
     """Части ветки разделяются пустой строкой."""
-    draft = db.get(Draft, draft_id)
+    draft = owned_draft(request, db, draft_id)
     if draft is None:
         return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
 
@@ -221,8 +245,8 @@ def edit(draft_id: int, parts: str = Form(...), topic: str = Form(""), db: Sessi
 
 
 @router.post("/queue/{draft_id}/regenerate")
-def regenerate(draft_id: int, instruction: str = Form(""), db: Session = Depends(get_db)):
-    draft = db.get(Draft, draft_id)
+def regenerate(request: Request, draft_id: int, instruction: str = Form(""), db: Session = Depends(get_db)):
+    draft = owned_draft(request, db, draft_id)
     if draft is None:
         return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
     result = generator.regenerate_draft(db, draft, instruction)
@@ -233,8 +257,8 @@ def regenerate(draft_id: int, instruction: str = Form(""), db: Session = Depends
 
 
 @router.post("/queue/{draft_id}/publish-now")
-def publish_now(draft_id: int, db: Session = Depends(get_db)):
-    draft = db.get(Draft, draft_id)
+def publish_now(request: Request, draft_id: int, db: Session = Depends(get_db)):
+    draft = owned_draft(request, db, draft_id)
     if draft is None:
         return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
     account = db.get(Account, draft.account_id)
@@ -249,11 +273,12 @@ def publish_now(draft_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/queue/{draft_id}/delete")
-def delete_draft(draft_id: int, db: Session = Depends(get_db)):
-    draft = db.get(Draft, draft_id)
-    if draft is not None:
-        db.delete(draft)
-        db.commit()
+def delete_draft(request: Request, draft_id: int, db: Session = Depends(get_db)):
+    draft = owned_draft(request, db, draft_id)
+    if draft is None:
+        return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
+    db.delete(draft)
+    db.commit()
     return RedirectResponse("/queue?ok=Удалено", status_code=303)
 
 
@@ -262,7 +287,7 @@ def delete_draft(draft_id: int, db: Session = Depends(get_db)):
 
 @router.get("/research", response_class=HTMLResponse)
 def research_page(request: Request, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
     if account is None:
         return RedirectResponse("/", status_code=303)
@@ -300,8 +325,8 @@ def research_page(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/research/run")
-def research_run(background: BackgroundTasks, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+def research_run(request: Request, background: BackgroundTasks, db: Session = Depends(get_db)):
+    account = current_account(request, db)
     if account is None:
         return RedirectResponse("/", status_code=303)
 
@@ -315,8 +340,8 @@ def research_run(background: BackgroundTasks, db: Session = Depends(get_db)):
 
 
 @router.post("/keywords/add")
-def add_keyword(term: str = Form(...), search_mode: str = Form("KEYWORD"), db: Session = Depends(get_db)):
-    account = get_active_account(db)
+def add_keyword(request: Request, term: str = Form(...), search_mode: str = Form("KEYWORD"), db: Session = Depends(get_db)):
+    account = current_account(request, db)
     if account is None:
         return RedirectResponse("/", status_code=303)
 
@@ -338,20 +363,24 @@ def add_keyword(term: str = Form(...), search_mode: str = Form("KEYWORD"), db: S
 
 
 @router.post("/keywords/{keyword_id}/toggle")
-def toggle_keyword(keyword_id: int, db: Session = Depends(get_db)):
+def toggle_keyword(request: Request, keyword_id: int, db: Session = Depends(get_db)):
+    account = current_account(request, db)
     keyword = db.get(Keyword, keyword_id)
-    if keyword is not None:
-        keyword.is_active = not keyword.is_active
-        db.commit()
+    if keyword is None or account is None or keyword.account_id != account.id:
+        return RedirectResponse("/research?error=Ключевое+слово+не+найдено", status_code=303)
+    keyword.is_active = not keyword.is_active
+    db.commit()
     return RedirectResponse("/research", status_code=303)
 
 
 @router.post("/keywords/{keyword_id}/delete")
-def delete_keyword(keyword_id: int, db: Session = Depends(get_db)):
+def delete_keyword(request: Request, keyword_id: int, db: Session = Depends(get_db)):
+    account = current_account(request, db)
     keyword = db.get(Keyword, keyword_id)
-    if keyword is not None:
-        db.delete(keyword)
-        db.commit()
+    if keyword is None or account is None or keyword.account_id != account.id:
+        return RedirectResponse("/research?error=Ключевое+слово+не+найдено", status_code=303)
+    db.delete(keyword)
+    db.commit()
     return RedirectResponse("/research?ok=Удалено", status_code=303)
 
 
@@ -360,7 +389,7 @@ def delete_keyword(keyword_id: int, db: Session = Depends(get_db)):
 
 @router.get("/posts", response_class=HTMLResponse)
 def posts_page(request: Request, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
     if account is None:
         return RedirectResponse("/", status_code=303)
@@ -379,10 +408,10 @@ def posts_page(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/posts/{post_id}", response_class=HTMLResponse)
 def post_detail(request: Request, post_id: int, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
     post = db.get(Post, post_id)
-    if post is None or account is None:
+    if post is None or account is None or post.account_id != account.id:
         return RedirectResponse("/posts?error=Пост+не+найден", status_code=303)
 
     metrics = list(
@@ -414,7 +443,7 @@ def post_detail(request: Request, post_id: int, db: Session = Depends(get_db)):
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     context = _base_context(request, db, account)
     context.update(
         {
@@ -439,7 +468,7 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/settings")
 async def save_settings(request: Request, db: Session = Depends(get_db)):
-    account = get_active_account(db)
+    account = current_account(request, db)
     if account is None:
         return RedirectResponse("/", status_code=303)
 
