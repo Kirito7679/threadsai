@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import analytics, generator, publisher, research
 from app.accounts import (
     DEFAULT_SETTINGS,
+    NEEDS_REAUTH,
     get_account_by_threads_id,
     get_active_account,
     get_keywords,
@@ -69,9 +70,26 @@ def _base_context(request: Request, db: Session, account: Account | None) -> dic
         "pending_count": pending_count,
         "app_settings": app_settings,
         "llm_ready": get_llm().is_configured,
+        # Токен отозван или протух: без баннера человек узнает об этом только
+        # по тому, что посты перестали выходить.
+        "needs_reauth": account is not None and account.status == NEEDS_REAUTH,
         "flash_ok": request.query_params.get("ok", ""),
         "flash_error": request.query_params.get("error", ""),
     }
+
+
+def account_jobs(db: Session, account: Account | None, limit: int = 15) -> list[JobRun]:
+    """Журнал задач своего кабинета. Чужие запуски не показываем."""
+    if account is None:
+        return []
+    return list(
+        db.scalars(
+            select(JobRun)
+            .where(JobRun.account_id == account.id)
+            .order_by(JobRun.started_at.desc())
+            .limit(limit)
+        )
+    )
 
 
 def _parse_local_datetime(raw: str) -> datetime | None:
@@ -111,7 +129,7 @@ def dashboard(request: Request, db: Session = Depends(get_db)):
                     .limit(6)
                 )
             ),
-            "jobs": list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(8))),
+            "jobs": account_jobs(db, account, limit=8),
             "report": latest_report(db, account.id),
         }
     )
@@ -330,10 +348,13 @@ def research_run(request: Request, background: BackgroundTasks, db: Session = De
     if account is None:
         return RedirectResponse("/", status_code=303)
 
-    def work() -> None:
-        from app.scheduler import run_job
+    # Только свой аккаунт: чужую квоту поиска кнопка в этом кабинете не тратит
+    account_id = account.id
 
-        run_job("research", research.run_full_research)
+    def work() -> None:
+        from app.scheduler import run_job_for_account
+
+        run_job_for_account("research", account_id)
 
     background.add_task(work)
     return RedirectResponse("/research?ok=Разведка+запущена+в+фоне", status_code=303)
@@ -449,18 +470,23 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
         {
             "values": get_settings_dict(db, account.id) if account else dict(DEFAULT_SETTINGS),
             "app_settings": app_settings,
-            "jobs": list(db.scalars(select(JobRun).order_by(JobRun.started_at.desc()).limit(15))),
+            "jobs": account_jobs(db, account, limit=15),
+            "spend": analytics.llm_spend(db, account.id) if account else None,
             "quota": None,
         }
     )
-    if account is not None:
+    # У отвалившегося аккаунта спрашивать квоту незачем — ответ всё равно будет
+    # ошибкой авторизации, а страница на 6 секунд подвиснет.
+    if account is not None and account.status != NEEDS_REAUTH:
         from app.security import decrypt
         from app.threads_api import ThreadsClient
 
         try:
             # Короткий таймаут и без повторов: страница не должна ждать сеть
-            quick = ThreadsClient(decrypt(account.access_token_enc), account.threads_user_id, timeout=6.0)
-            context["quota"] = publisher.remaining_quota(quick)
+            with ThreadsClient(
+                decrypt(account.access_token_enc), account.threads_user_id, timeout=6.0
+            ) as quick:
+                context["quota"] = publisher.remaining_quota(quick)
         except Exception as exc:  # noqa: BLE001 - показываем страницу даже если API недоступен
             log.warning("Квоту получить не удалось: %s", exc)
     return templates.TemplateResponse(request, "settings.html", context)
@@ -483,13 +509,19 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/jobs/{name}/run")
-def run_job_now(name: str, background: BackgroundTasks):
-    from app.scheduler import JOBS_BY_NAME
+def run_job_now(request: Request, name: str, background: BackgroundTasks, db: Session = Depends(get_db)):
+    from app.scheduler import JOB_WORK, run_job_for_account
 
-    job = JOBS_BY_NAME.get(name)
-    if job is None:
+    if name not in JOB_WORK:
         return RedirectResponse("/settings?error=Неизвестная+задача", status_code=303)
-    background.add_task(job)
+
+    account = current_account(request, db)
+    if account is None:
+        return RedirectResponse("/", status_code=303)
+
+    # Кнопка в кабинете запускает задачу только для этого кабинета
+    account_id = account.id
+    background.add_task(lambda: run_job_for_account(name, account_id))
     return RedirectResponse(f"/settings?ok=Задача+{name}+запущена", status_code=303)
 
 

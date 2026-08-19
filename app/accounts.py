@@ -47,8 +47,50 @@ def get_account_by_threads_id(db: Session, threads_user_id: str) -> Account | No
     ).first()
 
 
-def get_all_accounts(db: Session) -> list[Account]:
-    return list(db.scalars(select(Account).where(Account.is_active.is_(True)).order_by(Account.id)))
+def get_all_accounts(db: Session, only_healthy: bool = False) -> list[Account]:
+    """Активные аккаунты. only_healthy отсекает те, что ждут переподключения."""
+    stmt = select(Account).where(Account.is_active.is_(True))
+    if only_healthy:
+        stmt = stmt.where(Account.status != NEEDS_REAUTH)
+    return list(db.scalars(stmt.order_by(Account.id)))
+
+
+# ------------------------------------------------------------------ Здоровье
+
+STATUS_OK = "ok"
+NEEDS_REAUTH = "needs_reauth"
+# Столько подряд идущих сбоев подряд считаем поводом остановить фоновые задачи
+MAX_CONSECUTIVE_ERRORS = 5
+
+
+def mark_api_error(account: Account, exc: Exception) -> None:
+    """Фиксирует сбой обращения к Threads.
+
+    Ошибка авторизации означает отозванный или протухший токен — тут повторять
+    бессмысленно, аккаунт сразу уходит в needs_reauth. Прочие сбои (сеть,
+    троттлинг) копятся: пять подряд — тоже повод остановиться и сказать
+    человеку, иначе publish_due будет падать каждые 2 минуты вечно.
+    """
+    account.consecutive_errors = (account.consecutive_errors or 0) + 1
+    account.last_error = str(exc)[:1000]
+    account.last_error_at = datetime.now(timezone.utc)
+
+    is_auth = isinstance(exc, ThreadsAPIError) and exc.is_auth_error
+    if is_auth or account.consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        if account.status != NEEDS_REAUTH:
+            log.warning(
+                "Аккаунт @%s требует переподключения: %s", account.username, account.last_error
+            )
+        account.status = NEEDS_REAUTH
+
+
+def mark_healthy(account: Account) -> None:
+    """Успешный вызов обнуляет счётчик сбоев."""
+    if account.consecutive_errors or account.status != STATUS_OK or account.last_error:
+        account.consecutive_errors = 0
+        account.status = STATUS_OK
+        account.last_error = ""
+        account.last_error_at = None
 
 
 def get_setting(db: Session, account_id: int, key: str, default: str | None = None) -> str:
@@ -113,6 +155,8 @@ def upsert_account(db: Session, threads_user_id: str, token: str, expires_in: in
         db.add(account)
     save_token(account, token, expires_in)
     account.is_active = True
+    # Свежий токен снимает пометку needs_reauth — это и есть переподключение
+    mark_healthy(account)
     db.flush()
 
     # Подтягиваем профиль
@@ -156,6 +200,14 @@ def refresh_token_if_needed(db: Session, account: Account, threshold_days: int =
         if datetime.now(timezone.utc) - refreshed_at < timedelta(hours=24):
             return f"@{account.username}: токен моложе 24 часов, продлить нельзя"
 
-    payload = ThreadsClient.refresh_long_lived(decrypt(account.access_token_enc))
+    try:
+        payload = ThreadsClient.refresh_long_lived(decrypt(account.access_token_enc))
+    except ThreadsAPIError as exc:
+        # Не продлили — значит доступ отозван или токен уже мёртв. Молчать нельзя:
+        # через несколько дней аккаунт просто перестанет публиковать.
+        mark_api_error(account, exc)
+        raise
+
     save_token(account, payload["access_token"], payload.get("expires_in"))
+    mark_healthy(account)
     return f"@{account.username}: токен продлён на {int(payload.get('expires_in', 0)) // 86400} дн."

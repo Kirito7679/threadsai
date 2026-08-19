@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.accounts import client_for, get_keywords, get_settings_dict, set_setting
-from app.llm import LLMError, get_llm
+from app.llm import LLMError, get_llm, record_usage
 from app.models import Account, ResearchPost, TrendReport
 from app.threads_api import ThreadsAPIError, parse_timestamp
 
@@ -165,6 +165,7 @@ def analyze_research(db: Session, account: Account, limit: int = ANALYZE_BATCH) 
     except LLMError as exc:
         log.error("Классификация не удалась: %s", exc)
         return {"analyzed": 0, "error": str(exc)}
+    record_usage(db, account.id, "analyze", getattr(llm, "last_usage", None))
 
     items = result.get("items", []) if isinstance(result, dict) else []
     by_id = {str(post.id): post for post in pending}
@@ -267,6 +268,7 @@ def build_trend_report(db: Session, account: Account, window_hours: int = 72) ->
         )
         try:
             result = llm.chat_json(STRATEGIST_SYSTEM, user_prompt, temperature=0.6, max_tokens=4000)
+            record_usage(db, account.id, "trends", getattr(llm, "last_usage", None))
             if isinstance(result, dict):
                 payload = {**result, "stats": stats, "generated_by": llm.model}
         except LLMError as exc:

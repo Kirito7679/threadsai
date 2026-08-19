@@ -102,6 +102,17 @@
   {% if has_nav and not llm_ready %}
     <div class="flash warn"><svg class="ic"><use href="#i-alert"/></svg><span>DEEPSEEK_API_KEY не задан — генерация текстов выключена.</span></div>
   {% endif %}
+  {# Токен отозван или протух: без этого человек заметит только по тишине в ленте #}
+  {% if has_nav and needs_reauth %}
+    <div class="flash error">
+      <svg class="ic"><use href="#i-alert"/></svg>
+      <span>
+        Threads не принимает токен — публикация и сбор метрик остановлены.
+        <a href="/auth/threads">Подключить заново</a>{% if account.last_error %}.
+        Последняя ошибка: {{ account.last_error[:160] }}{% endif %}
+      </span>
+    </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </main>
 

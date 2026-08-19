@@ -1,6 +1,7 @@
 """Сбор и агрегация аналитики по своим постам и аккаунту."""
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -8,8 +9,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.accounts import client_for
-from app.models import Account, AccountMetric, Post, PostMetric
+from app.accounts import client_for, mark_api_error, mark_healthy
+from app.models import Account, AccountMetric, Draft, LlmUsage, Post, PostMetric
 from app.threads_api import ThreadsAPIError, parse_timestamp
 
 log = logging.getLogger(__name__)
@@ -17,11 +18,57 @@ log = logging.getLogger(__name__)
 # Посты старше этого возраста почти не набирают охват — метрики не опрашиваем
 METRICS_MAX_AGE_DAYS = 30
 
+# Как часто опрашивать пост в зависимости от его возраста.
+# Раньше каждый пост моложе 30 дней опрашивался ежечасно: 720 запросов на пост,
+# который не меняется уже месяц. При росте числа аккаунтов цикл не замыкается.
+METRICS_TIERS: tuple[tuple[timedelta, timedelta], ...] = (
+    (timedelta(hours=24), timedelta(hours=1)),  # первые сутки — каждый час
+    (timedelta(days=7), timedelta(hours=6)),  # до недели — раз в 6 часов
+    (timedelta(days=30), timedelta(days=1)),  # до месяца — раз в сутки
+)
+
 
 def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _adopt_by_draft(db: Session, account: Account, post: Post) -> bool:
+    """Привязывает подхваченный синхронизацией пост к его черновику.
+
+    Синхронизация идёт раз в час и может увидеть пост раньше, чем publisher
+    успеет зафиксировать свою строку. Тогда пост навсегда останется с пустым
+    topic и выпадет из topic_performance — то есть из обратной связи, ради
+    которой всё и затевалось. Ищем черновик по точному совпадению текста части.
+    """
+    text = (post.text or "").strip()
+    if not text:
+        return False
+
+    since = datetime.now(timezone.utc) - timedelta(days=2)
+    candidates = db.scalars(
+        select(Draft).where(
+            Draft.account_id == account.id,
+            Draft.status.in_(("published", "publishing", "failed")),
+            Draft.created_at >= since,
+        )
+    )
+    for draft in candidates:
+        try:
+            parts = json.loads(draft.parts_json or "[]")
+        except json.JSONDecodeError:
+            continue
+        for index, part in enumerate(parts):
+            if str(part).strip() != text:
+                continue
+            post.draft_id = draft.id
+            post.topic = draft.topic
+            post.chain_index = index
+            post.is_reply = index > 0
+            log.info("Пост %s привязан к черновику %s", post.media_id, draft.id)
+            return True
+    return False
 
 
 def sync_own_posts(db: Session, account: Account, limit: int = 100) -> dict:
@@ -31,6 +78,7 @@ def sync_own_posts(db: Session, account: Account, limit: int = 100) -> dict:
         items = client.get_own_posts(limit=limit)
     except ThreadsAPIError as exc:
         log.error("Не удалось получить свои посты: %s", exc)
+        mark_api_error(account, exc)
         return {"synced": 0, "error": str(exc)}
 
     known = {
@@ -40,41 +88,79 @@ def sync_own_posts(db: Session, account: Account, limit: int = 100) -> dict:
 
     created = 0
     updated = 0
+    adopted = 0
     for item in items:
         media_id = item.get("id")
         if not media_id:
             continue
         post = known.get(media_id)
-        if post is None:
+        is_new = post is None
+        if is_new:
             post = Post(account_id=account.id, media_id=media_id)
             db.add(post)
             known[media_id] = post
             created += 1
         else:
             updated += 1
+
         post.text = item.get("text", "") or post.text
         post.media_type = item.get("media_type", post.media_type)
         post.permalink = item.get("permalink", "") or post.permalink
-        post.is_reply = bool(item.get("is_reply"))
         post.published_at = parse_timestamp(item.get("timestamp")) or post.published_at
+        # is_reply и chain_index у постов из очереди уже проставлены publisher'ом:
+        # выставляем их только для тех, о ком мы ничего не знаем.
+        if is_new or not post.draft_id:
+            post.is_reply = bool(item.get("is_reply"))
+
+        # Пост из очереди, который синхронизация увидела первой
+        if not post.draft_id and not post.topic and _adopt_by_draft(db, account, post):
+            adopted += 1
 
     db.flush()
-    return {"synced": len(items), "created": created, "updated": updated}
+    return {"synced": len(items), "created": created, "updated": updated, "adopted": adopted}
+
+
+def needs_metrics(post: Post, now: datetime | None = None) -> bool:
+    """Пора ли опрашивать метрики этого поста.
+
+    Свежий пост меняется каждый час, месячный — почти никогда. Опрашивать их
+    одинаково значит тратить сотни запросов впустую и не успевать обойти
+    аккаунты, когда их станет много.
+    """
+    now = now or datetime.now(timezone.utc)
+    published = _aware(post.published_at)
+    if published is None:
+        return False
+
+    age = now - published
+    if age > timedelta(days=METRICS_MAX_AGE_DAYS):
+        return False
+
+    last = _aware(post.metrics_updated_at)
+    if last is None:
+        return True  # ни разу не опрашивали
+
+    for max_age, interval in METRICS_TIERS:
+        if age <= max_age:
+            return now - last >= interval
+    return False
 
 
 def collect_post_metrics(db: Session, account: Account, max_posts: int = 60) -> dict:
-    """Снимает метрики по свежим постам и пишет точку во временной ряд."""
+    """Снимает метрики по постам, которым это нужно, и пишет точку во временной ряд."""
     client = client_for(account)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=METRICS_MAX_AGE_DAYS)
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=METRICS_MAX_AGE_DAYS)
 
-    posts = list(
+    candidates = list(
         db.scalars(
             select(Post)
             .where(Post.account_id == account.id, Post.published_at >= cutoff)
             .order_by(Post.published_at.desc())
-            .limit(max_posts)
         )
     )
+    posts = [post for post in candidates if needs_metrics(post, now)][:max_posts]
+    skipped = len(candidates) - len(posts)
 
     updated = 0
     errors = 0
@@ -83,6 +169,10 @@ def collect_post_metrics(db: Session, account: Account, max_posts: int = 60) -> 
             metrics = client.get_post_insights(post.media_id)
         except ThreadsAPIError as exc:
             errors += 1
+            if exc.is_auth_error:
+                mark_api_error(account, exc)
+                log.warning("Токен аккаунта @%s не работает, сбор метрик прерван", account.username)
+                break
             if exc.is_rate_limit:
                 log.warning("Лимит запросов при сборе метрик, останавливаемся")
                 break
@@ -110,8 +200,10 @@ def collect_post_metrics(db: Session, account: Account, max_posts: int = 60) -> 
         )
         updated += 1
 
+    if updated and not errors:
+        mark_healthy(account)
     db.flush()
-    return {"posts": len(posts), "updated": updated, "errors": errors}
+    return {"due": len(posts), "updated": updated, "errors": errors, "skipped": skipped}
 
 
 def collect_account_metrics(db: Session, account: Account) -> dict:
@@ -125,7 +217,9 @@ def collect_account_metrics(db: Session, account: Account) -> dict:
         metrics = client.get_account_insights(since=since, until=until)
     except ThreadsAPIError as exc:
         log.error("Метрики аккаунта недоступны: %s", exc)
+        mark_api_error(account, exc)
         return {"error": str(exc)}
+    mark_healthy(account)
 
     day = now.strftime("%Y-%m-%d")
     row = db.scalars(
@@ -316,3 +410,47 @@ def best_hours(db: Session, account_id: int, days: int = 60) -> list[dict]:
         key=lambda item: item["avg_views"],
         reverse=True,
     )
+
+
+def llm_spend(db: Session, account_id: int, days: int = 30) -> dict:
+    """Во что обошлась модель для этого аккаунта за период.
+
+    Без этого нельзя ни построить тариф, ни заметить аккаунт, который
+    внезапно стал стоить втрое дороже остальных.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    rows = db.execute(
+        select(
+            LlmUsage.job,
+            func.count(LlmUsage.id),
+            func.sum(LlmUsage.prompt_tokens),
+            func.sum(LlmUsage.completion_tokens),
+            func.sum(LlmUsage.cost_usd),
+        )
+        .where(LlmUsage.account_id == account_id, LlmUsage.created_at >= cutoff)
+        .group_by(LlmUsage.job)
+    ).all()
+
+    # Округляем до шестого знака: один вызов стоит доли цента, при округлении
+    # до четвёртого мелкие задачи схлопывались бы в ноль.
+    by_job = [
+        {
+            "job": job,
+            "calls": calls,
+            "tokens": int((prompt or 0) + (completion or 0)),
+            "cost_usd": round(cost or 0.0, 6),
+        }
+        for job, calls, prompt, completion, cost in rows
+    ]
+    by_job.sort(key=lambda item: item["cost_usd"], reverse=True)
+
+    total_cost = round(sum(item["cost_usd"] for item in by_job), 6)
+    return {
+        "days": days,
+        "by_job": by_job,
+        "calls": sum(item["calls"] for item in by_job),
+        "tokens": sum(item["tokens"] for item in by_job),
+        "cost_usd": total_cost,
+        # Прикидка на месяц вперёд по текущему темпу
+        "monthly_usd": round(total_cost / days * 30, 2) if days else 0.0,
+    }

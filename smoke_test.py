@@ -19,11 +19,22 @@ os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(tempfile.mkdtemp(), "sm
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import analytics, generator, publisher, research  # noqa: E402
+import app.routes.ui as ui_module  # noqa: E402
+from app import accounts, analytics, generator, publisher, research  # noqa: E402
 from app.db import init_db, session_scope  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Account, Draft, Keyword, Post, PostMetric, ResearchPost  # noqa: E402
+from app.models import (  # noqa: E402
+    Account,
+    Draft,
+    JobRun,
+    Keyword,
+    LlmUsage,
+    Post,
+    PostMetric,
+    ResearchPost,
+)
 from app.security import encrypt  # noqa: E402
+from app.threads_api import ThreadsAPIError  # noqa: E402
 
 failures: list[str] = []
 
@@ -337,6 +348,164 @@ def main() -> int:
     with session_scope() as db:
         survivor = db.get(Draft, foreign_id)
         check("чужой черновик не изменён", survivor is not None and "чужого" in survivor.parts_json)
+
+    print("\n8. Здоровье аккаунта")
+    with session_scope() as db:
+        broken = db.get(Account, account_id)
+        check("аккаунт изначально здоров", broken.status == accounts.STATUS_OK)
+
+        # Сетевые сбои копятся и не сразу выключают аккаунт
+        for _ in range(accounts.MAX_CONSECUTIVE_ERRORS - 1):
+            accounts.mark_api_error(broken, ThreadsAPIError(500, {"error": {"message": "5xx"}}))
+        check(
+            "сетевые сбои не выключают аккаунт сразу",
+            broken.status == accounts.STATUS_OK and broken.consecutive_errors == 4,
+            f"{broken.status}/{broken.consecutive_errors}",
+        )
+        accounts.mark_api_error(broken, ThreadsAPIError(500, {"error": {"message": "5xx"}}))
+        check("череда сбоев уводит в needs_reauth", broken.status == accounts.NEEDS_REAUTH)
+
+        accounts.mark_healthy(broken)
+        check("успешный вызов чинит аккаунт", broken.status == accounts.STATUS_OK)
+
+        # Ошибка авторизации выключает аккаунт с первого раза
+        accounts.mark_api_error(broken, ThreadsAPIError(401, {"error": {"code": 190}}))
+        check("ошибка авторизации выключает сразу", broken.status == accounts.NEEDS_REAUTH)
+
+        db.flush()  # сессия с autoflush=False: без этого выборка не увидит статус
+        check(
+            "отвалившийся аккаунт не попадает в фоновые задачи",
+            broken.id not in [a.id for a in accounts.get_all_accounts(db, only_healthy=True)],
+        )
+        check(
+            "но виден в общем списке",
+            broken.id in [a.id for a in accounts.get_all_accounts(db)],
+        )
+        accounts.mark_healthy(broken)
+
+    print("\n9. Периодичность сбора метрик")
+    now = datetime.now(timezone.utc)
+    fresh = Post(published_at=now - timedelta(hours=2), metrics_updated_at=now - timedelta(minutes=20))
+    check("свежий пост не опрашивается чаще часа", not analytics.needs_metrics(fresh, now))
+    fresh.metrics_updated_at = now - timedelta(hours=2)
+    check("свежий пост опрашивается через час", analytics.needs_metrics(fresh, now))
+
+    week_old = Post(published_at=now - timedelta(days=3), metrics_updated_at=now - timedelta(hours=2))
+    check("недельный пост ждёт 6 часов", not analytics.needs_metrics(week_old, now))
+    week_old.metrics_updated_at = now - timedelta(hours=7)
+    check("недельный пост опрашивается через 6 часов", analytics.needs_metrics(week_old, now))
+
+    month_old = Post(published_at=now - timedelta(days=20), metrics_updated_at=now - timedelta(hours=10))
+    check("месячный пост ждёт сутки", not analytics.needs_metrics(month_old, now))
+
+    ancient = Post(published_at=now - timedelta(days=40), metrics_updated_at=None)
+    check("старый пост не опрашивается вовсе", not analytics.needs_metrics(ancient, now))
+
+    never = Post(published_at=now - timedelta(days=1), metrics_updated_at=None)
+    check("ни разу не опрошенный пост берётся всегда", analytics.needs_metrics(never, now))
+
+    print("\n10. Гонка синхронизации и публикации")
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        racing = Draft(
+            account_id=account.id,
+            status="approved",
+            topic="гонка",
+            parts_json=json.dumps(["Пост, который синхронизация увидела первой"], ensure_ascii=False),
+            scheduled_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        db.add(racing)
+        db.flush()
+
+        # Синхронизация успела завести строку раньше publisher'а
+        db.add(
+            Post(
+                account_id=account.id,
+                media_id="raced_media",
+                text="Пост, который синхронизация увидела первой",
+                published_at=datetime.now(timezone.utc),
+            )
+        )
+        db.flush()
+
+        post = publisher.record_post(db, account, "raced_media", racing, 0, "raced_media", racing_text := "Пост, который синхронизация увидела первой")
+        db.flush()
+        duplicates = db.query(Post).filter(Post.media_id == "raced_media").count()
+        check("дубликат строки не создан", duplicates == 1, f"строк: {duplicates}")
+        check("рубрика восстановлена", post.topic == "гонка", post.topic)
+        check("черновик привязан", post.draft_id == racing.id)
+
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        orphan = Draft(
+            account_id=account.id,
+            status="published",
+            topic="усыновление",
+            parts_json=json.dumps(["Мой старый пост про воронки продаж"], ensure_ascii=False),
+        )
+        db.add(orphan)
+        db.flush()
+        # own_1 приходит из заглушки get_own_posts и уже лежит без рубрики
+        stray = db.query(Post).filter(Post.media_id == "own_1").first()
+        stray.topic = ""
+        stray.draft_id = None
+        db.flush()
+
+        analytics.sync_own_posts(db, account)
+        db.flush()
+        adopted = db.query(Post).filter(Post.media_id == "own_1").first()
+        check("осиротевший пост привязан к черновику", adopted.draft_id == orphan.id, str(adopted.draft_id))
+        check("рубрика подтянулась", adopted.topic == "усыновление", adopted.topic)
+
+    print("\n11. Журнал задач и расход на модель")
+    with session_scope() as db:
+        mine = db.get(Account, account_id)
+        other = db.query(Account).filter(Account.username == "stranger").first()
+        db.add(JobRun(name="research", account_id=mine.id, status="ok", detail="мой запуск"))
+        db.add(JobRun(name="research", account_id=other.id, status="error", detail="чужая ошибка"))
+        db.add(LlmUsage(account_id=mine.id, job="generate", model="fake", prompt_tokens=1000, completion_tokens=500, cost_usd=0.00082))
+        db.add(LlmUsage(account_id=other.id, job="generate", model="fake", prompt_tokens=9000, completion_tokens=9000, cost_usd=0.5))
+        db.flush()
+
+        jobs = ui_module.account_jobs(db, mine)
+        check("журнал показывает только свои запуски", all(j.account_id == mine.id for j in jobs), str([j.account_id for j in jobs]))
+        check("чужая ошибка не видна", all("чужая" not in (j.detail or "") for j in jobs))
+
+        spend = analytics.llm_spend(db, mine.id)
+        check("расход посчитан по своему аккаунту", abs(spend["cost_usd"] - 0.00082) < 1e-5, str(spend))
+        check("чужой расход не приплюсован", spend["cost_usd"] < 0.5)
+        check("прогноз на месяц считается", spend["monthly_usd"] >= 0)
+
+    response = client.get("/settings")
+    check("страница настроек с блоком расхода", response.status_code == 200 and "Расход на модель" in response.text)
+
+    print("\n12. Ручной запуск задачи не трогает чужие аккаунты")
+    from app.scheduler import run_job_for_account  # noqa: E402
+
+    with session_scope() as db:
+        mine_id = db.get(Account, account_id).id
+        other_id = db.query(Account).filter(Account.username == "stranger").first().id
+        before_mine = db.query(JobRun).filter(JobRun.account_id == mine_id).count()
+        before_other = db.query(JobRun).filter(JobRun.account_id == other_id).count()
+
+    run_job_for_account("research", mine_id)
+
+    with session_scope() as db:
+        after_mine = db.query(JobRun).filter(JobRun.account_id == mine_id).count()
+        after_other = db.query(JobRun).filter(JobRun.account_id == other_id).count()
+        check("свой аккаунт получил запуск", after_mine == before_mine + 1, f"{before_mine} -> {after_mine}")
+        check("чужой аккаунт не тронут", after_other == before_other, f"{before_other} -> {after_other}")
+
+        last = (
+            db.query(JobRun)
+            .filter(JobRun.account_id == mine_id)
+            .order_by(JobRun.started_at.desc())
+            .first()
+        )
+        check("запуск завершён, а не подвис", last.status in ("ok", "error"), last.status)
+        check("запуск отмечен завершённым", last.finished_at is not None)
+
+    check("неизвестная задача отклонена", "error" in run_job_for_account("нет-такой", mine_id))
 
     print("\n" + "=" * 52)
     if failures:

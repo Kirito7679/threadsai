@@ -18,6 +18,68 @@ class LLMError(RuntimeError):
     pass
 
 
+class Usage:
+    """Расход токенов последнего вызова и его стоимость."""
+
+    __slots__ = ("prompt_tokens", "completion_tokens", "cached_tokens", "model")
+
+    def __init__(
+        self,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        cached_tokens: int = 0,
+        model: str = "",
+    ):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.cached_tokens = cached_tokens
+        self.model = model
+
+    @classmethod
+    def from_payload(cls, payload: dict, model: str) -> "Usage":
+        raw = payload.get("usage") or {}
+        # DeepSeek разделяет попадание и промах по кешу промпта — они стоят по-разному
+        cached = int(raw.get("prompt_cache_hit_tokens", 0) or 0)
+        return cls(
+            prompt_tokens=int(raw.get("prompt_tokens", 0) or 0),
+            completion_tokens=int(raw.get("completion_tokens", 0) or 0),
+            cached_tokens=cached,
+            model=model,
+        )
+
+    @property
+    def cost_usd(self) -> float:
+        miss = max(0, self.prompt_tokens - self.cached_tokens)
+        cost = (
+            miss * settings.deepseek_price_input
+            + self.cached_tokens * settings.deepseek_price_cached
+            + self.completion_tokens * settings.deepseek_price_output
+        ) / 1_000_000
+        return round(cost, 6)
+
+
+def record_usage(db, account_id: int | None, job: str, usage: "Usage | None") -> None:
+    """Пишет расход в журнал. Ошибка учёта не должна ронять генерацию."""
+    if usage is None or not (usage.prompt_tokens or usage.completion_tokens):
+        return
+    try:
+        from app.models import LlmUsage
+
+        db.add(
+            LlmUsage(
+                account_id=account_id,
+                job=job,
+                model=usage.model,
+                prompt_tokens=usage.prompt_tokens,
+                completion_tokens=usage.completion_tokens,
+                cached_tokens=usage.cached_tokens,
+                cost_usd=usage.cost_usd,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - учёт не критичен для основной работы
+        log.warning("Расход токенов не записан: %s", exc)
+
+
 def _extract_json(raw: str) -> Any:
     """DeepSeek иногда оборачивает JSON в ```json ... ``` — вытаскиваем."""
     raw = raw.strip()
@@ -51,6 +113,8 @@ class DeepSeekClient:
         self.base_url = (base_url or settings.deepseek_base_url).rstrip("/")
         self.model = model or settings.deepseek_model
         self.timeout = timeout
+        # Расход последнего успешного вызова — забирается через record_usage()
+        self.last_usage: Usage | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -99,6 +163,7 @@ class DeepSeekClient:
                         continue
                     raise LLMError(f"DeepSeek {response.status_code}: {detail}")
                 payload = response.json()
+                self.last_usage = Usage.from_payload(payload, body["model"])
                 return payload["choices"][0]["message"]["content"] or ""
             except httpx.HTTPError as exc:
                 last_error = exc

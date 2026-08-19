@@ -17,6 +17,14 @@
       Суточная квота публикаций:
       {% if quota is not none %}осталось {{ quota }} из 250{% else %}узнать не удалось{% endif %}
     </p>
+    {% if needs_reauth %}
+      <p class="small error-text">
+        Threads не принимает токен — фоновые задачи по этому аккаунту остановлены.
+        {% if account.last_error_at %}С {{ account.last_error_at | local }}.{% endif %}
+        Нажмите «Подключить Threads», чтобы выдать доступ заново.
+      </p>
+      <a class="btn primary" href="/auth/threads">Подключить Threads</a>
+    {% endif %}
     <form method="post" action="/auth/disconnect" onsubmit="return confirm('Отключить аккаунт?')">
       <button class="danger" type="submit">Отключить</button>
     </form>
@@ -80,6 +88,46 @@
     <button class="primary" type="submit">Сохранить</button>
   </div>
 </form>
+
+{% if spend %}
+<div class="grid cols-2">
+  <div class="card kpi">
+    <div class="label">Расход на модель</div>
+    <div class="value">${{ '%.2f'|format(spend.cost_usd) }}</div>
+    <div class="delta muted">за {{ spend.days }} дней · {{ spend.calls }} вызовов</div>
+  </div>
+  <div class="card kpi">
+    <div class="label">Прогноз на месяц</div>
+    <div class="value">${{ '%.2f'|format(spend.monthly_usd) }}</div>
+    <div class="delta muted">по текущему темпу</div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Во что обходится аккаунт</h2>
+  <p class="hint">
+    Цены DeepSeek берутся из переменных окружения — при смене тарифа поправьте
+    DEEPSEEK_PRICE_INPUT, DEEPSEEK_PRICE_CACHED и DEEPSEEK_PRICE_OUTPUT.
+  </p>
+  {% if spend.by_job %}
+    <table>
+      <thead><tr><th>Задача</th><th>Вызовов</th><th>Токенов</th><th>Стоимость</th></tr></thead>
+      <tbody>
+      {% for row in spend.by_job %}
+        <tr>
+          <td class="small">{{ row.job }}</td>
+          <td class="small muted">{{ row.calls }}</td>
+          <td class="small muted">{{ row.tokens | compact }}</td>
+          <td class="small">${{ '%.4f'|format(row.cost_usd) }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">Модель ещё не вызывалась.</p>
+  {% endif %}
+</div>
+{% endif %}
 
 <div class="card">
   <h2>Фоновые задачи</h2>

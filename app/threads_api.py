@@ -74,8 +74,34 @@ class ThreadsClient:
         self.access_token = access_token
         self.user_id = user_id or "me"
         self._timeout = timeout
+        self._client: httpx.Client | None = None
 
     # ------------------------------------------------------------------ HTTP
+
+    @property
+    def http(self) -> httpx.Client:
+        """Одно соединение на весь жизненный цикл клиента.
+
+        Сбор метрик — это десятки последовательных запросов подряд; создавать
+        под каждый новый httpx.Client значит платить за TLS-хендшейк каждый раз.
+        """
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(
+                timeout=self._timeout,
+                limits=httpx.Limits(max_keepalive_connections=4, max_connections=8),
+            )
+        return self._client
+
+    def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            self._client.close()
+        self._client = None
+
+    def __enter__(self) -> ThreadsClient:
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
 
     def _request(
         self,
@@ -93,8 +119,7 @@ class ThreadsClient:
         last_error: Exception | None = None
         for attempt in range(retries + 1):
             try:
-                with httpx.Client(timeout=self._timeout) as client:
-                    response = client.request(method, url, params=params, data=data or None)
+                response = self.http.request(method, url, params=params, data=data or None)
                 try:
                     payload = response.json()
                 except ValueError:

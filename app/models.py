@@ -37,6 +37,14 @@ class Account(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
+    # Здоровье подключения. Пока status="ok", фоновые задачи работают с аккаунтом.
+    # needs_reauth выставляется, когда Threads отвечает ошибкой авторизации:
+    # иначе publish_due молча падает каждые 2 минуты и никто об этом не знает.
+    status: Mapped[str] = mapped_column(String(24), default="ok")  # ok | needs_reauth
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     settings: Mapped[list["AccountSetting"]] = relationship(
         back_populates="account", cascade="all, delete-orphan"
     )
@@ -213,13 +221,42 @@ class AccountMetric(Base):
 
 
 class JobRun(Base):
-    """Журнал фоновых задач — в панели видно, что и когда отработало."""
+    """Журнал фоновых задач — в панели видно, что и когда отработало.
+
+    Одна строка на аккаунт: кабинет не должен показывать юзернеймы и тексты
+    ошибок соседей. account_id=None — сбой самой задачи, ещё до того как
+    стало известно, по каким аккаунтам она пойдёт.
+    """
 
     __tablename__ = "job_runs"
+    __table_args__ = (Index("ix_job_account_time", "account_id", "started_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
     name: Mapped[str] = mapped_column(String(64), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), default="running")  # running | ok | error
     detail: Mapped[str] = mapped_column(Text, default="")
+
+
+class LlmUsage(Base):
+    """Расход токенов DeepSeek: во что обходится обслуживание аккаунта."""
+
+    __tablename__ = "llm_usage"
+    __table_args__ = (Index("ix_usage_account_time", "account_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    # analyze | trends | generate | rewrite
+    job: Mapped[str] = mapped_column(String(32), default="")
+    model: Mapped[str] = mapped_column(String(64), default="")
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

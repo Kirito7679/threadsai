@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.accounts import get_settings_dict
 from app.analytics import engagement, top_posts, topic_performance
 from app.config import settings as app_settings
-from app.llm import LLMError, get_llm
+from app.llm import LLMError, get_llm, record_usage
 from app.models import Account, Draft
 from app.research import latest_report
 from app.threads_api import MAX_POST_CHARS
@@ -183,6 +183,7 @@ def generate_drafts(db: Session, account: Account, count: int | None = None) -> 
     except LLMError as exc:
         log.error("Генерация не удалась: %s", exc)
         return {"created": 0, "error": str(exc)}
+    record_usage(db, account.id, "generate", getattr(llm, "last_usage", None))
 
     items = result.get("drafts", []) if isinstance(result, dict) else []
     if not items:
@@ -236,6 +237,7 @@ def regenerate_draft(db: Session, draft: Draft, instruction: str = "") -> dict:
         result = llm.chat_json(WRITER_SYSTEM, prompt, temperature=0.9, max_tokens=2500)
     except LLMError as exc:
         return {"ok": False, "error": str(exc)}
+    record_usage(db, account.id, "rewrite", getattr(llm, "last_usage", None))
 
     items = result.get("drafts", []) if isinstance(result, dict) else []
     if not items:

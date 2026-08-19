@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.accounts import client_for, get_setting
+from app.accounts import client_for, get_setting, mark_api_error, mark_healthy
 from app.models import Account, Draft, Post
 from app.threads_api import DAILY_PUBLISH_LIMIT, ThreadsAPIError, ThreadsClient
 
@@ -23,6 +23,41 @@ def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def record_post(
+    db: Session,
+    account: Account,
+    media_id: str,
+    draft: Draft,
+    index: int,
+    root_media_id: str,
+    text: str,
+) -> Post:
+    """Заводит строку опубликованного поста или дополняет уже существующую.
+
+    Часовая синхронизация могла увидеть этот пост в ленте раньше, чем мы дошли
+    до записи: тогда строка уже есть, и вставка второй нарушила бы уникальность
+    (account_id, media_id) — публикация упала бы уже после того, как пост
+    оказался в ленте. Поэтому дописываем то, чего синхронизация знать не может:
+    привязку к черновику, рубрику и место в цепочке.
+    """
+    post = db.scalars(
+        select(Post).where(Post.account_id == account.id, Post.media_id == media_id)
+    ).first()
+    if post is None:
+        post = Post(account_id=account.id, media_id=media_id)
+        db.add(post)
+
+    post.draft_id = draft.id
+    post.root_media_id = root_media_id
+    post.chain_index = index
+    post.text = text
+    post.topic = draft.topic
+    post.is_reply = index > 0
+    if post.published_at is None:
+        post.published_at = datetime.now(timezone.utc)
+    return post
 
 
 def remaining_quota(client: ThreadsClient) -> int | None:
@@ -75,19 +110,7 @@ def publish_draft(db: Session, account: Account, draft: Draft) -> dict:
             published_ids.append(media_id)
             previous_id = media_id
 
-            db.add(
-                Post(
-                    account_id=account.id,
-                    media_id=media_id,
-                    draft_id=draft.id,
-                    root_media_id=published_ids[0],
-                    chain_index=index,
-                    text=text,
-                    topic=draft.topic,
-                    is_reply=index > 0,
-                    published_at=datetime.now(timezone.utc),
-                )
-            )
+            record_post(db, account, media_id, draft, index, published_ids[0], text)
             db.flush()
 
             if index < len(parts) - 1:
@@ -96,6 +119,8 @@ def publish_draft(db: Session, account: Account, draft: Draft) -> dict:
     except (ThreadsAPIError, ValueError) as exc:
         message = str(exc)
         log.error("Публикация черновика %s не удалась: %s", draft.id, message)
+        if isinstance(exc, ThreadsAPIError):
+            mark_api_error(account, exc)
         if published_ids:
             # Часть ветки уже в ленте — дальше вручную, автоповтор всё продублирует
             draft.status = "failed"
@@ -121,13 +146,16 @@ def publish_draft(db: Session, account: Account, draft: Draft) -> dict:
             info = client.get_post(media_id)
         except ThreadsAPIError:
             continue
-        post = db.scalars(select(Post).where(Post.media_id == media_id)).first()
+        post = db.scalars(
+            select(Post).where(Post.account_id == account.id, Post.media_id == media_id)
+        ).first()
         if post is not None:
             post.permalink = info.get("permalink", "")
 
     draft.status = "published"
     draft.published_at = datetime.now(timezone.utc)
     draft.error = ""
+    mark_healthy(account)
     db.flush()
 
     log.info("Черновик %s опубликован: %s", draft.id, published_ids[0])

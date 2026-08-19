@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-chat"
     deepseek_reasoner_model: str = "deepseek-reasoner"
 
+    # Цены DeepSeek в долларах за миллион токенов — нужны, чтобы считать
+    # себестоимость аккаунта. Тариф меняется, поэтому вынесен в переменные.
+    deepseek_price_input: float = 0.27  # промпт мимо кеша
+    deepseek_price_cached: float = 0.07  # промпт из кеша
+    deepseek_price_output: float = 1.10  # ответ
+
     timezone: str = "Europe/Moscow"
     drafts_per_run: int = 5
     research_interval_hours: int = 6
