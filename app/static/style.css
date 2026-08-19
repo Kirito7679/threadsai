@@ -569,28 +569,112 @@ code {
 /* ============================================================ Адаптив */
 
 @media (max-width: 900px) {
-  .sidebar {
-    position: sticky;
+  /* Сайдбар распадается на две части: тонкая шапка сверху и панель вкладок
+     снизу — большой палец достаёт до навигации, а не тянется к верху экрана.
+     display:contents позволяет развести детей одного <aside> по разным
+     краям экрана, не дублируя разметку в шаблоне. */
+  .sidebar { display: contents; }
+
+  /* ---- Шапка: бренд слева, аккаунт и выход справа ---- */
+  .sidebar > .brand {
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: 56px;
+    padding: 0 16px;
+    gap: 10px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--line);
+    z-index: 30;
+  }
+  .sidebar > .brand .brand-text { display: flex; }
+  .sidebar > .brand .brand-mark { width: 30px; height: 30px; border-radius: 9px; }
+  .sidebar > .brand .brand-mark .ic-lg { width: 18px; height: 18px; }
+  .sidebar > .brand .brand-text strong { font-size: 14px; }
+  .sidebar > .brand .brand-text em { font-size: 9.5px; }
+
+  .sidebar > .sidebar-foot {
+    position: fixed;
     top: 0;
-    width: auto;
+    right: 10px;
+    height: 56px;
     flex-direction: row;
     align-items: center;
-    gap: 14px;
-    padding: 10px 14px;
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-    overflow-x: auto;
-    box-shadow: var(--shadow-sm);
+    gap: 4px;
+    z-index: 31;
   }
-  .brand-text { display: none; }
-  .nav { flex-direction: row; gap: 4px; flex: 1; }
-  .nav-item span { display: none; }
-  /* Иконка без подписи должна оставаться пальцедоступной: 44×44 */
-  .nav-item { min-width: 44px; min-height: 44px; justify-content: center; padding: 0; }
+  .whoami {
+    background: transparent;
+    border: none;
+    padding: 6px 8px;
+    font-size: 12.5px;
+    max-width: 42vw;
+  }
+  /* Выход — иконка без подписи, но с полноценной целью касания */
+  .sidebar-foot .nav-item.subtle {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+    padding: 0;
+  }
+  .sidebar-foot .nav-item.subtle span { display: none; }
+
+  /* ---- Нижняя панель вкладок ---- */
+  .sidebar > .nav {
+    position: fixed;
+    inset: auto 0 0 0;
+    flex-direction: row;
+    gap: 2px;
+    flex: none;
+    padding: 6px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -2px 10px -4px rgba(43, 35, 20, .14);
+    z-index: 30;
+  }
+  .nav .nav-item {
+    flex: 1 1 0;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    min-width: 0;
+    min-height: 52px;
+    padding: 6px 2px;
+    border-radius: 12px;
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: -.005em;
+  }
+  .nav .nav-item span {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nav .nav-item .ic { width: 21px; height: 21px; }
   .nav-item.active::before { display: none; }
-  .sidebar-foot { flex-direction: row; }
-  .whoami .handle { display: none; }
-  .content { margin-left: 0; padding: 22px 16px 56px; }
+  /* Счётчик висит над иконкой, а не оттесняет подпись */
+  .nav .count {
+    position: absolute;
+    top: 3px;
+    left: 50%;
+    margin-left: 3px;
+    min-width: 17px;
+    padding: 0 5px;
+    font-size: 10px;
+    line-height: 17px;
+    box-shadow: 0 0 0 2px var(--surface);
+  }
+
+  /* Контент уступает место обеим полосам */
+  .content {
+    margin-left: 0;
+    padding: 74px 16px calc(92px + env(safe-area-inset-bottom, 0px));
+  }
+  /* Публичные страницы и вход идут без навигации — отступы им не нужны */
+  body.bare .content { padding: 0; }
+  body.no-nav .content { padding: 24px 16px 48px; }
+
   .grid.cols-2, .grid.cols-4 { grid-template-columns: 1fr; }
   .auth-shell { grid-template-columns: 1fr; }
   .auth-aside { display: none; }
