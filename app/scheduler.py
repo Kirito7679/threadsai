@@ -10,7 +10,13 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import analytics, generator, publisher, research
-from app.accounts import get_all_accounts, get_setting, refresh_token_if_needed
+from app.accounts import (
+    account_tz,
+    get_all_accounts,
+    get_setting,
+    get_settings_dict,
+    refresh_token_if_needed,
+)
 from app.config import settings
 from app.db import session_scope
 from app.models import Account, JobRun
@@ -134,6 +140,25 @@ def work_sync_and_metrics(db, account) -> dict:
     return {"sync": synced, "metrics": metrics}
 
 
+def work_generate_scheduled(db, account) -> dict:
+    """Плановая генерация: срабатывает, когда у аккаунта наступил его час.
+
+    Задача идёт ежечасно и сама решает, чей сейчас час. Один глобальный крон
+    на GENERATION_HOUR приезжал бы пользователю из другого пояса среди ночи.
+    """
+    conf = get_settings_dict(db, account.id)
+    try:
+        wanted = int(conf.get("generation_hour", settings.generation_hour))
+    except (TypeError, ValueError):
+        wanted = settings.generation_hour
+
+    local_hour = datetime.now(account_tz(db, account.id)).hour
+    if local_hour != wanted % 24:
+        return {"skipped": f"не его час: сейчас {local_hour}, ждём {wanted}"}
+
+    return work_generate(db, account)
+
+
 def work_generate(db, account) -> dict:
     result = generator.generate_drafts(db, account)
 
@@ -188,7 +213,8 @@ def job_research() -> None:
 
 
 def job_generate() -> None:
-    run_job("generate_drafts", work_generate)
+    # Ежечасный проход; кому сейчас пора — решает work_generate_scheduled
+    run_job("generate_drafts", work_generate_scheduled)
 
 
 def job_refresh_tokens() -> None:
@@ -232,9 +258,11 @@ def start_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+    # Ежечасно, а не раз в сутки: час генерации свой у каждого аккаунта,
+    # и задача сама пропускает тех, чьё время ещё не пришло
     scheduler.add_job(
         job_generate,
-        CronTrigger(hour=settings.generation_hour, minute=0),
+        CronTrigger(minute=0),
         id="generate_drafts",
         replace_existing=True,
         max_instances=1,

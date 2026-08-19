@@ -6,9 +6,30 @@
   <p class="lead">Как убрать из приложения всё, что оно о вас сохранило.</p>
 
   {% if code %}
-    <div class="flash ok">
-      Запрос принят. Код подтверждения: <strong>{{ code }}</strong>
-    </div>
+    {% if entry and entry.status == 'done' %}
+      <div class="flash ok">
+        <svg class="ic"><use href="#i-check"/></svg>
+        <span>
+          Данные удалены {{ entry.completed_at | local('%d.%m.%Y %H:%M') }}.
+          Код подтверждения: <strong>{{ code }}</strong>
+        </span>
+      </div>
+    {% elif entry and entry.status == 'not_found' %}
+      <div class="flash ok">
+        <svg class="ic"><use href="#i-check"/></svg>
+        <span>Удалять нечего: данных по этому аккаунту в приложении нет. Код: <strong>{{ code }}</strong></span>
+      </div>
+    {% elif entry %}
+      <div class="flash warn">
+        <svg class="ic"><use href="#i-alert"/></svg>
+        <span>Заявка в работе. Код подтверждения: <strong>{{ code }}</strong></span>
+      </div>
+    {% else %}
+      <div class="flash warn">
+        <svg class="ic"><use href="#i-alert"/></svg>
+        <span>Заявка с кодом <strong>{{ code }}</strong> не найдена.</span>
+      </div>
+    {% endif %}
   {% endif %}
 
   <div class="card">
@@ -24,11 +45,13 @@
   <div class="card">
     <h2>Шаг 2. Удалить накопленные данные</h2>
     <p class="small">
-      Войдите в панель, откройте <strong>Настройки</strong> и нажмите
-      <strong>Отключить</strong> — токен доступа перестаёт использоваться.
-      Чтобы полностью стереть историю постов, метрик и черновиков, напишите
-      владельцу приложения на почту из карточки приложения в кабинете Meta:
-      данные удаляются из базы по запросу в течение 30 дней.
+      Отзыв доступа в Threads запускает удаление автоматически: приложение
+      получает от Meta уведомление и стирает все ваши данные, а на этой
+      странице по коду подтверждения видно, что удаление прошло.
+    </p>
+    <p class="small">
+      Можно и не дожидаясь: войдите в панель, откройте <strong>Настройки</strong>
+      и нажмите <strong>Удалить все данные</strong> — стирание произойдёт сразу.
     </p>
   </div>
 

@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import Account, AccountSetting, Keyword
 from app.security import decrypt, encrypt
 from app.threads_api import ThreadsAPIError, ThreadsClient
@@ -30,7 +32,21 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "reply_control": "everyone",
     "min_hours_between_posts": "2",
     "autopilot": "false",
+    # Часовой пояс и час генерации — свои у каждого аккаунта: расписание
+    # «в 8:00» бессмысленно, если владельцы живут в разных поясах.
+    "timezone": settings.timezone,
+    "generation_hour": str(settings.generation_hour),
 }
+
+
+def account_tz(db: Session, account_id: int) -> ZoneInfo:
+    """Часовой пояс аккаунта. При неизвестном имени — пояс сервиса."""
+    name = get_setting(db, account_id, "timezone", settings.timezone)
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("Неизвестный часовой пояс %r у аккаунта %s", name, account_id)
+        return ZoneInfo(settings.timezone)
 
 
 def get_active_account(db: Session) -> Account | None:
@@ -211,3 +227,44 @@ def refresh_token_if_needed(db: Session, account: Account, threshold_days: int =
     save_token(account, payload["access_token"], payload.get("expires_in"))
     mark_healthy(account)
     return f"@{account.username}: токен продлён на {int(payload.get('expires_in', 0)) // 86400} дн."
+
+
+def purge_account(db: Session, account: Account) -> dict:
+    """Полностью удаляет аккаунт и все его данные.
+
+    Каскады объявлены во внешних ключах, но SQLite по умолчанию их не
+    применяет, поэтому дочерние строки удаляем явно — иначе после «удаления»
+    в базе останутся посты, метрики и черновики.
+    """
+    from app.models import (
+        AccountMetric,
+        AccountSetting,
+        Draft,
+        JobRun,
+        Keyword,
+        LlmUsage,
+        Post,
+        PostMetric,
+        ResearchPost,
+        TrendReport,
+    )
+
+    account_id = account.id
+    username = account.username
+    removed: dict[str, int] = {}
+
+    post_ids = list(db.scalars(select(Post.id).where(Post.account_id == account_id)))
+    if post_ids:
+        removed["post_metrics"] = (
+            db.query(PostMetric).filter(PostMetric.post_id.in_(post_ids)).delete(synchronize_session=False)
+        )
+
+    for model in (Post, Draft, ResearchPost, TrendReport, Keyword, AccountMetric, AccountSetting, JobRun, LlmUsage):
+        removed[model.__tablename__] = (
+            db.query(model).filter(model.account_id == account_id).delete(synchronize_session=False)
+        )
+
+    db.delete(account)
+    db.flush()
+    log.info("Аккаунт @%s (%s) удалён полностью: %s", username, account_id, removed)
+    return {"account_id": account_id, "username": username, "removed": removed}

@@ -260,3 +260,22 @@ class LlmUsage(Base):
     cached_tokens: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
+class DeletionRequest(Base):
+    """Заявка на удаление данных, пришедшая колбэком от Meta.
+
+    Meta требует вернуть код подтверждения и адрес, где пользователь проверит
+    ход удаления, — значит заявку нужно где-то хранить.
+    """
+
+    __tablename__ = "deletion_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    threads_user_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    # pending | done | not_found
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

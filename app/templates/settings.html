@@ -25,9 +25,19 @@
       </p>
       <a class="btn primary" href="/auth/threads">Подключить Threads</a>
     {% endif %}
-    <form method="post" action="/auth/disconnect" onsubmit="return confirm('Отключить аккаунт?')">
-      <button class="danger" type="submit">Отключить</button>
-    </form>
+    <div class="row">
+      <form method="post" action="/auth/disconnect" onsubmit="return confirm('Отключить аккаунт? Данные останутся в базе.')">
+        <button class="danger" type="submit">Отключить</button>
+      </form>
+      <form method="post" action="/auth/delete-data"
+            onsubmit="return confirm('Удалить безвозвратно все данные этого аккаунта: настройки, ключевые слова, черновики, посты и метрики?')">
+        <button class="danger" type="submit">Удалить все данные</button>
+      </form>
+    </div>
+    <p class="hint">
+      «Отключить» останавливает работу, данные сохраняются и вернутся при повторном
+      подключении. «Удалить все данные» стирает их безвозвратно.
+    </p>
   {% else %}
     <a class="btn primary" href="/auth/threads">Подключить Threads</a>
   {% endif %}
@@ -58,6 +68,22 @@
 
   <div class="card">
     <h2>Расписание</h2>
+    <div class="grid cols-2">
+      <div>
+        <label>Часовой пояс</label>
+        <select name="timezone">
+          {% for zone in timezones %}
+            <option value="{{ zone }}" {{ 'selected' if values.timezone == zone }}>{{ zone }}</option>
+          {% endfor %}
+        </select>
+        <p class="hint">Часы публикации и час генерации считаются в этом поясе.</p>
+      </div>
+      <div>
+        <label>Час генерации черновиков</label>
+        <input type="number" name="generation_hour" value="{{ values.generation_hour }}" min="0" max="23">
+        <p class="hint">Раз в сутки ИИ пишет новые ветки в это время.</p>
+      </div>
+    </div>
     <div class="grid cols-2">
       <div>
         <label>Постов в день</label>

@@ -11,20 +11,25 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 os.environ.setdefault("SECRET_KEY", "smoke-test-secret-key-please-ignore")
 os.environ.setdefault("DASHBOARD_PASSWORD", "test123")
 os.environ.setdefault("ENABLE_SCHEDULER", "false")
+# Нужен для проверки подписи signed_request в колбэках Meta
+os.environ.setdefault("THREADS_APP_SECRET", "smoke-test-app-secret")
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(tempfile.mkdtemp(), "smoke.db")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app.routes.ui as ui_module  # noqa: E402
 from app import accounts, analytics, generator, publisher, research  # noqa: E402
+from app.config import settings as app_settings  # noqa: E402
 from app.db import init_db, session_scope  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (  # noqa: E402
     Account,
+    DeletionRequest,
     Draft,
     JobRun,
     Keyword,
@@ -506,6 +511,188 @@ def main() -> int:
         check("запуск отмечен завершённым", last.finished_at is not None)
 
     check("неизвестная задача отклонена", "error" in run_job_for_account("нет-такой", mine_id))
+
+    print("\n13. Изоляция сессий: чужой кабинет недоступен")
+    from app.security import make_session_cookie  # noqa: E402
+
+    with session_scope() as db:
+        mine = db.get(Account, account_id)
+        other = db.query(Account).filter(Account.username == "stranger").first()
+        mine_uid, other_uid = mine.threads_user_id, other.threads_user_id
+        mine_id, other_id = mine.id, other.id
+        # У чужака должен быть валидный токен, иначе страница упадёт не на том
+        other.access_token_enc = encrypt("stranger-token")
+        db.flush()
+
+    def session_client(payload: dict) -> TestClient:
+        c = TestClient(app)
+        c.cookies.set("session", make_session_cookie(payload))
+        return c
+
+    # Вход своим Threads-аккаунтом отдаёт свой кабинет
+    c_mine = session_client({"auth": True, "uid": mine_uid, "owner": False})
+    r = c_mine.get("/settings")
+    check("свой кабинет открывается", r.status_code == 200 and "test_user" in r.text, str(r.status_code))
+    check("чужой юзернейм не показан", "stranger" not in r.text)
+
+    c_other = session_client({"auth": True, "uid": other_uid, "owner": False})
+    r = c_other.get("/settings")
+    check("чужак видит свой кабинет", r.status_code == 200 and "stranger" in r.text, str(r.status_code))
+    check("а не первый аккаунт в базе", "test_user" not in r.text)
+
+    # Сессия с неизвестным uid НЕ должна проваливаться в первый аккаунт
+    c_ghost = session_client({"auth": True, "uid": "000000000000000", "owner": False})
+    r = c_ghost.get("/", follow_redirects=False)
+    check("неизвестный uid не пускает в чужой кабинет",
+          r.status_code == 200 and "test_user" not in r.text, str(r.status_code))
+    r = c_ghost.get("/queue", follow_redirects=False)
+    check("и не даёт очередь", r.status_code == 303, str(r.status_code))
+
+    # Чужой черновик недоступен даже по прямому номеру
+    with session_scope() as db:
+        victim = db.query(Draft).filter(Draft.account_id == mine_id).first()
+        victim_id, victim_parts = victim.id, victim.parts_json
+    r = c_other.post(f"/queue/{victim_id}/edit", data={"parts": "взлом"}, follow_redirects=False)
+    check("чужак не редактирует мой черновик", "error" in r.headers.get("location", ""))
+    with session_scope() as db:
+        check("черновик не изменён", db.get(Draft, victim_id).parts_json == victim_parts)
+
+    print("\n14. Вход по паролю")
+    from app import security  # noqa: E402
+
+    security.reset_failed_logins("testclient")
+    bare = TestClient(app)
+    r = bare.post("/auth/login", data={"password": "неверный"}, follow_redirects=False)
+    check("неверный пароль отклонён", r.status_code == 401, str(r.status_code))
+
+    for _ in range(4):
+        bare.post("/auth/login", data={"password": "неверный"}, follow_redirects=False)
+    r = bare.post("/auth/login", data={"password": "test123"}, follow_redirects=False)
+    check("перебор блокируется даже с верным паролем", r.status_code == 429, str(r.status_code))
+
+    security.reset_failed_logins("testclient")
+    r = bare.post("/auth/login", data={"password": "test123"}, follow_redirects=False)
+    check("после сброса верный пароль работает", r.status_code == 303, str(r.status_code))
+
+    original_flag = security.settings.enable_password_login
+    security.settings.enable_password_login = False
+    security.reset_failed_logins("testclient")
+    r = bare.post("/auth/login", data={"password": "test123"}, follow_redirects=False)
+    check("выключенный вход по паролю не пускает", r.status_code == 403, str(r.status_code))
+    r = bare.get("/auth/login")
+    check("форма пароля скрыта", "Войти по паролю" not in r.text)
+    security.settings.enable_password_login = original_flag
+
+    original_pass = security.settings.dashboard_password
+    security.settings.dashboard_password = "admin"
+    check("пароль из примера не принимается", not security.password_login_available())
+    security.settings.dashboard_password = original_pass
+    security.reset_failed_logins("testclient")
+
+    print("\n15. Колбэки Meta: подпись и настоящее удаление")
+    import base64 as _b64  # noqa: E402
+    import hashlib as _hash  # noqa: E402
+    import hmac as _hmac  # noqa: E402
+
+    def sign(payload: dict, secret: str) -> str:
+        raw = _b64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        sig = _hmac.new(secret.encode(), raw.encode("ascii"), _hash.sha256).digest()
+        return _b64.urlsafe_b64encode(sig).decode().rstrip("=") + "." + raw
+
+    secret = security.settings.threads_app_secret
+    good = {"algorithm": "HMAC-SHA256", "user_id": other_uid}
+
+    r = bare.post("/auth/threads/delete", data={"signed_request": sign(good, "не-тот-секрет")})
+    check("подделанная подпись отклонена", r.status_code == 400, str(r.status_code))
+    with session_scope() as db:
+        check("данные при этом целы", db.get(Account, other_id) is not None)
+
+    r = bare.post("/auth/threads/delete", data={"signed_request": "мусор-без-точки"})
+    check("мусор вместо signed_request отклонён", r.status_code == 400, str(r.status_code))
+
+    with session_scope() as db:
+        db.add(Draft(account_id=other_id, status="pending", parts_json=json.dumps(["чужой"])))
+        db.add(Post(account_id=other_id, media_id="stranger_post", text="чужой пост"))
+        db.flush()
+
+    r = bare.post("/auth/threads/delete", data={"signed_request": sign(good, secret)})
+    payload = r.json()
+    check("валидная подпись принята", r.status_code == 200 and "confirmation_code" in payload, r.text[:120])
+    code = payload.get("confirmation_code", "")
+    check("вернулся адрес страницы статуса", code and code in payload.get("url", ""))
+
+    with session_scope() as db:
+        check("аккаунт удалён", db.get(Account, other_id) is None)
+        check("черновики удалены", db.query(Draft).filter(Draft.account_id == other_id).count() == 0)
+        check("посты удалены", db.query(Post).filter(Post.account_id == other_id).count() == 0)
+        check("мой аккаунт не тронут", db.get(Account, mine_id) is not None)
+        entry = db.query(DeletionRequest).filter(DeletionRequest.code == code).first()
+        check("заявка сохранена со статусом done", entry is not None and entry.status == "done", entry.status if entry else "нет")
+
+    r = bare.get(f"/data-deletion?code={code}")
+    check("страница статуса показывает удаление", r.status_code == 200 and "Данные удалены" in r.text)
+
+    # Отзыв доступа отключает аккаунт, но данные оставляет
+    r = bare.post("/auth/threads/uninstall", data={"signed_request": sign({"algorithm": "HMAC-SHA256", "user_id": mine_uid}, secret)})
+    check("отзыв доступа принят", r.status_code == 200, str(r.status_code))
+    with session_scope() as db:
+        acc = db.get(Account, mine_id)
+        check("аккаунт отключён", acc is not None and not acc.is_active)
+        check("но данные сохранены", db.query(Draft).filter(Draft.account_id == mine_id).count() > 0)
+        acc.is_active = True
+        acc.status = "ok"
+
+    print("\n16. Часовой пояс у каждого аккаунта свой")
+    from app.accounts import account_tz, set_setting  # noqa: E402
+    from app.scheduler import work_generate_scheduled  # noqa: E402
+
+    with session_scope() as db:
+        account = db.get(Account, mine_id)
+        set_setting(db, mine_id, "timezone", "Asia/Tokyo")
+        set_setting(db, mine_id, "posting_hours", "9")
+        set_setting(db, mine_id, "posts_per_day", "1")
+        db.flush()
+        check("пояс аккаунта читается", str(account_tz(db, mine_id)) == "Asia/Tokyo")
+
+        slots = generator.propose_slots(db, account, 2)
+        tokyo = ZoneInfo("Asia/Tokyo")
+        hours_local = {s.astimezone(tokyo).hour for s in slots}
+        check("слоты попадают в 9 утра по Токио", hours_local == {9}, str(hours_local))
+
+        set_setting(db, mine_id, "timezone", "America/New_York")
+        db.flush()
+        slots_ny = generator.propose_slots(db, account, 2)
+        ny = ZoneInfo("America/New_York")
+        check("смена пояса сдвигает слоты",
+              {s.astimezone(ny).hour for s in slots_ny} == {9}
+              and slots_ny[0] != slots[0], str(slots_ny[0]))
+
+        check("битый пояс откатывается к поясу сервиса",
+              (set_setting(db, mine_id, "timezone", "Марс/Олимп"), db.flush(),
+               str(account_tz(db, mine_id)))[2] == app_settings.timezone)
+        set_setting(db, mine_id, "timezone", "Asia/Tokyo")
+        db.flush()
+
+    # Плановая генерация ждёт своего часа по местному времени
+    with session_scope() as db:
+        account = db.get(Account, mine_id)
+        tokyo_hour = datetime.now(ZoneInfo("Asia/Tokyo")).hour
+        set_setting(db, mine_id, "generation_hour", str((tokyo_hour + 3) % 24))
+        db.flush()
+        res = work_generate_scheduled(db, account)
+        check("не его час — генерации нет", "skipped" in res, str(res))
+
+        set_setting(db, mine_id, "generation_hour", str(tokyo_hour))
+        db.flush()
+        res = work_generate_scheduled(db, account)
+        check("его час — генерация идёт", "created" in res, str(res))
+
+    r = c_mine.post("/settings", data={"timezone": "Не/Существует"}, follow_redirects=False)
+    check("битый пояс не сохраняется", "error" in r.headers.get("location", ""))
+    r = c_mine.post("/settings", data={"generation_hour": "99"}, follow_redirects=False)
+    check("час генерации вне диапазона отклонён", "error" in r.headers.get("location", ""))
+    r = c_mine.post("/settings", data={"timezone": "Europe/Berlin", "generation_hour": "7"}, follow_redirects=False)
+    check("корректные значения сохраняются", "ok=" in r.headers.get("location", ""))
 
     print("\n" + "=" * 52)
     if failures:

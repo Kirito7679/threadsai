@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -15,6 +15,7 @@ from app import analytics, generator, publisher, research
 from app.accounts import (
     DEFAULT_SETTINGS,
     NEEDS_REAUTH,
+    account_tz,
     get_account_by_threads_id,
     get_active_account,
     get_keywords,
@@ -27,24 +28,57 @@ from app.llm import get_llm
 from app.models import Account, Draft, JobRun, Keyword, Post, PostMetric, ResearchPost
 from app.research import latest_report
 from app.security import read_session_cookie
-from app.templating import templates
+from app.templating import set_request_tz, templates
 from app.threads_api import MAX_POST_CHARS
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+# Пояс сервиса — запасной, когда кабинета ещё нет
 LOCAL_TZ = ZoneInfo(app_settings.timezone)
+
+# Список для выпадающего меню в настройках. Полный набор из zoneinfo — это
+# около шестисот пунктов, выбирать в них неудобно; здесь пояса, в которых
+# реально живут пользователи, плюс тот, что задан сервису.
+COMMON_TIMEZONES = sorted(
+    {
+        app_settings.timezone,
+        "UTC",
+        "Europe/Kaliningrad", "Europe/Moscow", "Europe/Samara", "Europe/Kyiv",
+        "Europe/Minsk", "Europe/Riga", "Europe/Vilnius", "Europe/Tallinn",
+        "Europe/Warsaw", "Europe/Berlin", "Europe/Paris", "Europe/Madrid",
+        "Europe/Rome", "Europe/Amsterdam", "Europe/Lisbon", "Europe/London",
+        "Europe/Istanbul", "Europe/Belgrade", "Europe/Prague",
+        "Asia/Tbilisi", "Asia/Yerevan", "Asia/Baku", "Asia/Almaty",
+        "Asia/Tashkent", "Asia/Bishkek", "Asia/Dushanbe", "Asia/Ashgabat",
+        "Asia/Yekaterinburg", "Asia/Omsk", "Asia/Novosibirsk", "Asia/Krasnoyarsk",
+        "Asia/Irkutsk", "Asia/Yakutsk", "Asia/Vladivostok",
+        "Asia/Dubai", "Asia/Jerusalem", "Asia/Bangkok", "Asia/Shanghai",
+        "Asia/Tokyo", "Asia/Seoul", "Asia/Singapore", "Asia/Kolkata",
+        "America/New_York", "America/Chicago", "America/Denver",
+        "America/Los_Angeles", "America/Sao_Paulo", "America/Mexico_City",
+        "Australia/Sydney", "Australia/Perth", "Africa/Cairo", "Africa/Lagos",
+    }
+)
 
 
 def current_account(request: Request, db: Session) -> Account | None:
-    """Аккаунт текущей сессии.
+    """Аккаунт текущей сессии — строго тот, чьим Threads-аккаунтом вошли.
 
-    В панель может войти любой Threads Tester приложения, и у каждого свой
-    кабинет. Запасной вход по паролю сессию без uid — тогда берём первый
-    активный аккаунт.
+    Раньше при неудачном поиске по uid происходил откат на первый активный
+    аккаунт в базе. Пока пользователь один, это незаметно; при публичном
+    входе любой сбой поиска отправлял человека в чужой кабинет с полными
+    правами. Теперь не нашли свой — не отдаём никакой.
+
+    Откат на первый аккаунт остаётся только у сессии владельца, полученной
+    запасным входом по паролю: это его собственное развёртывание.
     """
     session = read_session_cookie(request.cookies.get("session")) or {}
-    account = get_account_by_threads_id(db, session.get("uid", ""))
-    return account or get_active_account(db)
+    uid = str(session.get("uid", "") or "")
+    if uid:
+        return get_account_by_threads_id(db, uid)
+    if session.get("owner"):
+        return get_active_account(db)
+    return None
 
 
 def owned_draft(request: Request, db: Session, draft_id: int) -> Draft | None:
@@ -58,13 +92,18 @@ def owned_draft(request: Request, db: Session, draft_id: int) -> Draft | None:
 
 def _base_context(request: Request, db: Session, account: Account | None) -> dict:
     pending_count = 0
+    tz = LOCAL_TZ
     if account is not None:
         pending_count = (
             db.query(Draft)
             .filter(Draft.account_id == account.id, Draft.status == "pending")
             .count()
         )
+        # Все даты на странице показываем в поясе владельца кабинета
+        tz = account_tz(db, account.id)
+    set_request_tz(tz)
     return {
+        "tz_name": str(tz),
         "request": request,
         "account": account,
         "pending_count": pending_count,
@@ -92,15 +131,20 @@ def account_jobs(db: Session, account: Account | None, limit: int = 15) -> list[
     )
 
 
-def _parse_local_datetime(raw: str) -> datetime | None:
-    """Строка из <input type=datetime-local> -> aware UTC."""
+def _parse_local_datetime(raw: str, tz: ZoneInfo) -> datetime | None:
+    """Строка из <input type=datetime-local> -> aware UTC.
+
+    Пояс берётся из настроек аккаунта: поле в браузере показывает местное
+    время владельца, и трактовать его в поясе сервиса значит промахнуться
+    на разницу поясов.
+    """
     if not raw:
         return None
     try:
         naive = datetime.fromisoformat(raw)
     except ValueError:
         return None
-    return naive.replace(tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+    return naive.replace(tzinfo=tz).astimezone(timezone.utc)
 
 
 # ------------------------------------------------------------------ Дашборд
@@ -190,7 +234,7 @@ def approve(request: Request, draft_id: int, scheduled_at: str = Form(""), db: S
     if draft is None:
         return RedirectResponse("/queue?error=Черновик+не+найден", status_code=303)
 
-    when = _parse_local_datetime(scheduled_at)
+    when = _parse_local_datetime(scheduled_at, account_tz(db, draft.account_id))
     if when is None:
         account = db.get(Account, draft.account_id)
         slots = generator.propose_slots(db, account, 1) if account else []
@@ -472,6 +516,7 @@ def settings_page(request: Request, db: Session = Depends(get_db)):
             "app_settings": app_settings,
             "jobs": account_jobs(db, account, limit=15),
             "spend": analytics.llm_spend(db, account.id) if account else None,
+            "timezones": COMMON_TIMEZONES,
             "quota": None,
         }
     )
@@ -500,8 +545,26 @@ async def save_settings(request: Request, db: Session = Depends(get_db)):
 
     form = await request.form()
     for key in DEFAULT_SETTINGS:
-        if key in form:
-            set_setting(db, account.id, key, str(form[key]).strip())
+        if key not in form:
+            continue
+        value = str(form[key]).strip()
+
+        # Битый пояс сломал бы и расписание, и показ дат — не принимаем
+        if key == "timezone":
+            try:
+                ZoneInfo(value)
+            except (ZoneInfoNotFoundError, ValueError):
+                return RedirectResponse(
+                    f"/settings?error=Неизвестный+часовой+пояс:+{value}", status_code=303
+                )
+        if key == "generation_hour":
+            if not value.isdigit() or not 0 <= int(value) <= 23:
+                return RedirectResponse(
+                    "/settings?error=Час+генерации+должен+быть+числом+от+0+до+23", status_code=303
+                )
+
+        set_setting(db, account.id, key, value)
+
     # Чекбокс автопилота приходит только когда включён
     set_setting(db, account.id, "autopilot", "true" if form.get("autopilot") else "false")
     db.commit()

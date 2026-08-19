@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.accounts import get_settings_dict
+from app.accounts import account_tz, get_settings_dict
 from app.analytics import engagement, top_posts, topic_performance
 from app.config import settings as app_settings
 from app.llm import LLMError, get_llm, record_usage
@@ -258,9 +258,13 @@ def regenerate_draft(db: Session, draft: Draft, instruction: str = "") -> dict:
 
 
 def propose_slots(db: Session, account: Account, count: int) -> list[datetime]:
-    """Ближайшие свободные слоты по расписанию из настроек (в UTC)."""
+    """Ближайшие свободные слоты по расписанию из настроек (в UTC).
+
+    Часы публикации задаются в поясе владельца кабинета, а не сервиса:
+    «9, 13, 19» у пользователя из другого пояса — это его 9, 13 и 19.
+    """
     conf = get_settings_dict(db, account.id)
-    tz = ZoneInfo(app_settings.timezone)
+    tz = account_tz(db, account.id)
 
     try:
         hours = sorted({int(h.strip()) for h in conf.get("posting_hours", "9,13,19").split(",") if h.strip()})

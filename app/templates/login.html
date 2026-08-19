@@ -79,19 +79,24 @@
       </div>
       {% endif %}
 
+      {% if password_login %}
       <details>
         <summary>Не получается войти через Threads</summary>
         <div>
-          <p class="hint">Запасной вход по паролю панели — если Meta недоступна.</p>
+          <p class="hint">
+            Запасной вход по паролю панели — если Meta недоступна. Открывает
+            кабинет владельца этого развёртывания.
+          </p>
           <form method="post" action="/auth/login">
             <label for="password">Пароль панели</label>
-            <input type="password" id="password" name="password" required>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
             <div class="row end" style="margin-top:14px">
               <button type="submit">Войти по паролю</button>
             </div>
           </form>
         </div>
       </details>
+      {% endif %}
     </div>
   </section>
 

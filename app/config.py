@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     dashboard_password: str = "admin"
     secret_key: str = "dev-secret-change-me"
 
+    # Запасной вход по паролю даёт доступ к первому аккаунту в базе. Для
+    # собственного развёртывания это удобно, для публичного сервиса — чёрный
+    # ход в чужой кабинет. Перед выходом в общий доступ ставится false.
+    enable_password_login: bool = True
+
     database_url: str = "sqlite:///./data/app.db"
 
     # DeepSeek

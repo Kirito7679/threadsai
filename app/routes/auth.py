@@ -7,10 +7,24 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.accounts import get_account_by_threads_id, get_active_account, upsert_account
+from app.accounts import (
+    get_account_by_threads_id,
+    get_active_account,
+    purge_account,
+    upsert_account,
+)
 from app.config import settings
 from app.db import get_db
-from app.security import check_password, make_session_cookie, new_state_token, read_session_cookie
+from app.security import (
+    check_password,
+    login_locked,
+    make_session_cookie,
+    new_state_token,
+    password_login_available,
+    read_session_cookie,
+    register_failed_login,
+    reset_failed_logins,
+)
 from app.templating import templates
 from app.threads_api import ThreadsAPIError, ThreadsClient
 
@@ -22,10 +36,16 @@ STATE_COOKIE = "oauth_state"
 COOKIE_SECURE = settings.app_base_url.startswith("https")
 
 
-def _set_session(response, threads_user_id: str = ""):
+def _set_session(response, threads_user_id: str = "", owner: bool = False):
+    """Кладёт сессию.
+
+    uid — Threads-аккаунт, чей это кабинет. owner=True ставится только при
+    входе по паролю: такая сессия работает с первым аккаунтом развёртывания,
+    и именно поэтому она отделена от обычной флагом, а не отсутствием uid.
+    """
     response.set_cookie(
         SESSION_COOKIE,
-        make_session_cookie({"auth": True, "uid": threads_user_id}),
+        make_session_cookie({"auth": True, "uid": threads_user_id, "owner": owner}),
         httponly=True,
         samesite="lax",
         secure=COOKIE_SECURE,
@@ -34,39 +54,75 @@ def _set_session(response, threads_user_id: str = ""):
     return response
 
 
+def _client_key(request: Request) -> str:
+    """Ключ для счётчика неудачных входов."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _login_context(request: Request, db: Session, error: str = "") -> dict:
+    return {
+        "error": error,
+        "account": None,
+        "has_accounts": get_active_account(db) is not None,
+        "app_settings": settings,
+        "app_configured": bool(settings.threads_app_id and settings.threads_app_secret),
+        "password_login": password_login_available(),
+    }
+
+
 @router.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, error: str = "", db: Session = Depends(get_db)):
     """Единственный вход — через Threads. Пароль остаётся запасным вариантом."""
     return templates.TemplateResponse(
         request,
         "login.html",
-        {
-            "error": error or request.query_params.get("error", ""),
-            "account": None,
-            "has_accounts": get_active_account(db) is not None,
-            "app_settings": settings,
-            "app_configured": bool(settings.threads_app_id and settings.threads_app_secret),
-        },
+        _login_context(request, db, error or request.query_params.get("error", "")),
     )
 
 
 @router.post("/login")
 def login(request: Request, password: str = Form(...), db: Session = Depends(get_db)):
-    """Запасной вход по паролю — на случай, если OAuth недоступен."""
-    if not check_password(password):
+    """Запасной вход по паролю — на случай, если OAuth недоступен.
+
+    Выключается флагом ENABLE_PASSWORD_LOGIN и не работает с паролем из
+    примера конфигурации. Перебор ограничен: пять неудач с одного адреса
+    закрывают вход на 15 минут.
+    """
+    if not password_login_available():
         return templates.TemplateResponse(
             request,
             "login.html",
-            {
-                "error": "Неверный пароль",
-                "account": None,
-                "has_accounts": get_active_account(db) is not None,
-                "app_settings": settings,
-                "app_configured": bool(settings.threads_app_id and settings.threads_app_secret),
-            },
+            _login_context(request, db, "Вход по паролю отключён — войдите через Threads"),
+            status_code=403,
+        )
+
+    key = _client_key(request)
+    locked_for = login_locked(key)
+    if locked_for:
+        log.warning("Вход по паролю заблокирован для %s ещё на %sс", key, locked_for)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            _login_context(
+                request, db, f"Слишком много попыток. Попробуйте через {locked_for // 60 + 1} мин"
+            ),
+            status_code=429,
+        )
+
+    if not check_password(password):
+        register_failed_login(key)
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            _login_context(request, db, "Неверный пароль"),
             status_code=401,
         )
-    return _set_session(RedirectResponse("/", status_code=303))
+
+    reset_failed_logins(key)
+    return _set_session(RedirectResponse("/", status_code=303), owner=True)
 
 
 @router.get("/logout")
@@ -142,13 +198,44 @@ def oauth_callback(
     return response
 
 
+def _session_account(request: Request, db: Session):
+    """Аккаунт сессии по тем же правилам, что и в панели."""
+    session = read_session_cookie(request.cookies.get(SESSION_COOKIE)) or {}
+    uid = str(session.get("uid", "") or "")
+    if uid:
+        return get_account_by_threads_id(db, uid)
+    if session.get("owner"):
+        return get_active_account(db)
+    return None
+
+
 @router.post("/disconnect")
 def disconnect(request: Request, db: Session = Depends(get_db)):
-    session = read_session_cookie(request.cookies.get(SESSION_COOKIE)) or {}
-    account = get_account_by_threads_id(db, session.get("uid", "")) or get_active_account(db)
+    """Отключение: аккаунт перестаёт работать, данные остаются."""
+    account = _session_account(request, db)
     if account is not None:
         account.is_active = False
         db.commit()
     response = RedirectResponse("/auth/login?ok=Аккаунт+отключён", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+@router.post("/delete-data")
+def delete_my_data(request: Request, db: Session = Depends(get_db)):
+    """Удаление всех данных аккаунта по требованию пользователя.
+
+    Meta требует, чтобы пользователь мог удалить свои данные не только через
+    колбэк отзыва доступа, но и из самого приложения.
+    """
+    account = _session_account(request, db)
+    if account is None:
+        return RedirectResponse("/auth/login?error=Аккаунт+не+найден", status_code=303)
+
+    result = purge_account(db, account)
+    db.commit()
+    log.info("Пользователь удалил свои данные: %s", result)
+
+    response = RedirectResponse("/auth/login?ok=Все+данные+удалены", status_code=303)
     response.delete_cookie(SESSION_COOKIE)
     return response
